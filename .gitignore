@@ -1,0 +1,43 @@
+# Secrets (.env.example is committed as the template)
+.env
+.env.*
+!.env.example
+secrets/
+
+# Virtual environments (uv sync creates .venv/)
+.venv/
+venv/
+
+# Python build and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.import_linter_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Market data, chains and backtest stores
+data/
+*.parquet
+*.duckdb
+
+# AI assistant config (local only)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# AI assistant config (local only)
+CLAUDE.md
+.claude/

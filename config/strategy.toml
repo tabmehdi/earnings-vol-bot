@@ -1,0 +1,16 @@
+# Strategy parameters. Changing a strategy fact needs an ADR in docs/decisions/.
+
+[filters]
+min_avg_volume_30d = 1_500_000
+min_iv30_rv30 = 1.25
+max_term_slope = -0.00406      # per day, front expiry to 45d
+term_slope_horizon_days = 45
+max_leg_spread_pct = 0.10      # leg spread as a fraction of mid
+min_open_interest = 500
+
+[structure]
+back_expiry_offset_days = 30   # back = expiry closest to front + 30 days
+
+[schedule]
+entry_minutes_before_close = 15
+exit_minutes_after_open = 15

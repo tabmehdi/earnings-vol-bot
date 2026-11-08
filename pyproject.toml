@@ -1,0 +1,66 @@
+[project]
+name = "evbot"
+version = "0.1.0"
+description = "Event-driven options bot that sells earnings IV crush with long calendar spreads"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.16",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "integration: hits real external APIs (needs keys in .env)",
+]
+
+# Enforces the layer rules mechanically: `uv run lint-imports`.
+[tool.importlinter]
+root_package = "evbot"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers"
+type = "layers"
+layers = [
+    "evbot.main_live | evbot.main_backtest",
+    "evbot.adapters | evbot.backtest",
+    "evbot.app",
+    "evbot.ports",
+    "evbot.strategy",
+    "evbot.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Live and backtest adapters stay independent"
+type = "independence"
+modules = ["evbot.adapters", "evbot.backtest"]
+
+[[tool.importlinter.contracts]]
+name = "No SDKs in the core"
+type = "forbidden"
+source_modules = ["evbot.domain", "evbot.strategy", "evbot.ports", "evbot.app"]
+forbidden_modules = ["alpaca", "requests", "httpx", "sqlalchemy", "duckdb", "pandas"]

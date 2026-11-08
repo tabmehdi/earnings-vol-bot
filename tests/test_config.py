@@ -34,3 +34,15 @@ def test_env_var_overrides_default_path(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setenv(CONFIG_ENV_VAR, str(path))
 
     assert load_config().filters.min_open_interest == 42
+
+
+def test_default_config_loads_pricing_and_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+
+    config = load_config()
+
+    assert config.pricing.risk_free_rate == 0.045
+    assert config.metrics.iv_days == 30
+    assert config.metrics.rv_window == 30
+    assert config.metrics.volume_window == 30
+    assert config.metrics.trading_days_per_year == 252

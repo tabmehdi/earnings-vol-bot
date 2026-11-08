@@ -23,7 +23,7 @@ src/evbot/
   adapters/   Nasdaq, Alpaca, storage
   backtest/   simulated data, broker and clock + Backtester
 ```
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
+The code follows a ports-and-adapters architecture. The domain and strategy layers are pure Python with no I/O, the application services depend only on interfaces in `ports/`, and concrete integrations live at the edge. Live trading and backtesting wire the same `TradingBot` to different adapters, so a backtest exercises the code that trades, and import-linter enforces the layer boundaries in CI.
 
 ## Getting started
 ```bash
@@ -33,4 +33,4 @@ uv run pytest -m "not integration"
 ```
 
 ## Status
-Rebuild in progress. See the roadmap for the current phase.
+Rebuild in progress.

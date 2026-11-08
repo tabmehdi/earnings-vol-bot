@@ -31,13 +31,10 @@ data/
 .claude/
 CLAUDE.md
 CLAUDE.local.md
+docs/
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-
-# AI assistant config (local only)
-CLAUDE.md
-.claude/

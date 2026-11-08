@@ -1,5 +1,5 @@
 import math
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -7,7 +7,7 @@ from evbot.domain.options import OptionChain, OptionContract, OptionQuote, Optio
 
 FRONT = date(2026, 11, 20)
 BACK = date(2026, 12, 18)
-AS_OF = datetime(2026, 11, 18, 15, 45)
+AS_OF = datetime(2026, 11, 18, 15, 45, tzinfo=UTC)
 
 
 def contract(strike: float, right: OptionRight, expiry: date = FRONT) -> OptionContract:
@@ -155,3 +155,8 @@ def test_chain_rejects_quotes_for_another_underlying() -> None:
 def test_chain_rejects_duplicate_contracts() -> None:
     with pytest.raises(ValueError):
         chain(100.0, [quote(100.0, OptionRight.CALL), quote(100.0, OptionRight.CALL)])
+
+
+def test_chain_rejects_naive_as_of() -> None:
+    with pytest.raises(ValueError):
+        OptionChain("AAPL", 100.0, AS_OF.replace(tzinfo=None), ())

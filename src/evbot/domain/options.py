@@ -64,6 +64,8 @@ class OptionChain:
     def __post_init__(self) -> None:
         if self.spot <= 0:
             raise ValueError(f"spot must be positive, got {self.spot}")
+        if self.as_of.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
         seen: set[OptionContract] = set()
         for q in self.quotes:
             if q.contract.underlying != self.underlying:

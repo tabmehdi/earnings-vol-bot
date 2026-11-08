@@ -31,10 +31,25 @@ class ScheduleConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PricingConfig:
+    risk_free_rate: float
+
+
+@dataclass(frozen=True, slots=True)
+class MetricsConfig:
+    iv_days: int
+    rv_window: int
+    volume_window: int
+    trading_days_per_year: int
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyConfig:
     filters: FilterConfig
     structure: StructureConfig
     schedule: ScheduleConfig
+    pricing: PricingConfig
+    metrics: MetricsConfig
 
 
 def config_path() -> Path:
@@ -50,4 +65,6 @@ def load_config(path: Path | None = None) -> StrategyConfig:
         filters=FilterConfig(**raw["filters"]),
         structure=StructureConfig(**raw["structure"]),
         schedule=ScheduleConfig(**raw["schedule"]),
+        pricing=PricingConfig(**raw["pricing"]),
+        metrics=MetricsConfig(**raw["metrics"]),
     )

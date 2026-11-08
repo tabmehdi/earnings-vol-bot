@@ -14,3 +14,12 @@ back_expiry_offset_days = 30   # back = expiry closest to front + 30 days
 [schedule]
 entry_minutes_before_close = 15
 exit_minutes_after_open = 15
+
+[pricing]
+risk_free_rate = 0.045
+
+[metrics]
+iv_days = 30
+rv_window = 30
+volume_window = 30
+trading_days_per_year = 252

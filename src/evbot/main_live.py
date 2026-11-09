@@ -40,6 +40,10 @@ from evbot.strategy.verdict import DefaultVerdictPolicy
 from evbot.strategy.volatility import YangZhangEstimator
 
 REPORT_TIMINGS = (ReportTiming.BMO, ReportTiming.AMC, ReportTiming.UNKNOWN)
+TICKERS_WARNING = (
+    "WARNING: these tickers are scanned as if they reported next session, "
+    "so verdicts aren't meaningful for names without an upcoming report."
+)
 
 
 def build_evaluator(config: StrategyConfig) -> SignalEvaluator:
@@ -221,6 +225,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     secret_key = os.environ.get("ALPACA_SECRET_KEY")
     if not key_id or not secret_key:
         parser.error("set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment or .env")
+    if tickers:
+        print(TICKERS_WARNING, flush=True)
 
     config = load_config()
     market = config.market_data

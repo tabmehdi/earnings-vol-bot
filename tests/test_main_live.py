@@ -140,6 +140,46 @@ def test_write_scan_log_writes_one_json_line_per_ticker(tmp_path: Path) -> None:
     assert json.loads(lines[0])["symbol"] == "AAPL"
 
 
+class StubPreview:
+    def universe_for(self, tickers: tuple[str, ...]) -> ScanUniverse:
+        return ScanUniverse(TODAY, NEXT, (), ())
+
+    def find_reports(self) -> ScanUniverse:
+        return ScanUniverse(TODAY, NEXT, (), ())
+
+    def evaluate(self, universe: ScanUniverse, limit: int | None) -> PreviewReport:
+        return PreviewReport(())
+
+
+def run_preview_stubbed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], *arguments: str
+) -> list[str]:
+    monkeypatch.setattr(main_live, "load_dotenv", lambda: False)
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    monkeypatch.setattr(main_live, "build_preview", lambda *_: StubPreview())
+    monkeypatch.setattr(main_live, "write_scan_log", lambda *_: None)
+    main_live.main(["preview", *arguments])
+    return capsys.readouterr().out.splitlines()
+
+
+def test_tickers_run_starts_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines = run_preview_stubbed(monkeypatch, capsys, "--tickers", "AAPL,MSFT")
+
+    assert lines[0].startswith("WARNING")
+    assert "as if they reported next session" in lines[0]
+
+
+def test_a_normal_scan_has_no_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines = run_preview_stubbed(monkeypatch, capsys)
+
+    assert not any(line.startswith("WARNING") for line in lines)
+
+
 def test_preview_refuses_to_start_without_keys(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

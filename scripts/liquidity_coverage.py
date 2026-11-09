@@ -47,13 +47,29 @@ def latest_scan(snapshot_dir: Path) -> Path:
     return scans[-1]
 
 
+def read_rows(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 def load_rows(path: Path) -> list[dict[str, Any]]:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     return [
         row
-        for row in rows
+        for row in read_rows(path)
         if row.get("front_spread_pct") is not None and row.get("back_spread_pct") is not None
     ]
+
+
+def format_legs(rows: list[dict[str, Any]]) -> str:
+    header = f"{'SYMBOL':<8}{'FRONT SPREAD':>13}{'FRONT OI':>10}{'BACK SPREAD':>13}{'BACK OI':>10}"
+    return "\n".join([header, *map(_leg_line, rows)])
+
+
+def _leg_line(row: dict[str, Any]) -> str:
+    spread = [row.get(f"{leg}_spread_pct") for leg in ("front", "back")]
+    interest = [row.get(f"{leg}_open_interest") for leg in ("front", "back")]
+    front_spread, back_spread = ("-" if s is None else f"{s:.1%}" for s in spread)
+    front_oi, back_oi = ("-" if oi is None else f"{oi:,}" for oi in interest)
+    return f"{row['symbol']:<8}{front_spread:>13}{front_oi:>10}{back_spread:>13}{back_oi:>10}"
 
 
 def coverage(rows: list[dict[str, Any]]) -> list[RuleResult]:
@@ -100,6 +116,8 @@ def main() -> None:
     path = args.scan or latest_scan(args.snapshot_dir)
     rows = load_rows(path)
     print(f"Scan: {path}")
+    print(format_legs(read_rows(path)))
+    print()
     print(f"Tickers with a buildable spread: {len(rows)}")
     print(format_table(coverage(rows), len(rows)))
 

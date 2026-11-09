@@ -96,6 +96,37 @@ def test_load_keeps_only_rows_with_both_legs(tmp_path: Path) -> None:
     assert [r["symbol"] for r in COVERAGE.load_rows(path)] == ["A"]
 
 
+def test_read_rows_keeps_every_ticker_in_the_scan(tmp_path: Path) -> None:
+    path = tmp_path / "tickers_1.jsonl"
+    no_legs = {"symbol": "B", "front_spread_pct": None, "back_spread_pct": None}
+    path.write_text("\n".join(json.dumps(r) for r in (row("A"), no_legs)), encoding="utf-8")
+
+    assert [r["symbol"] for r in COVERAGE.read_rows(path)] == ["A", "B"]
+
+
+def test_leg_table_shows_both_legs_of_every_ticker() -> None:
+    rows = [row("AAPL", front=(0.031, 4_210), back=(0.125, 88))]
+
+    aapl = next(line for line in COVERAGE.format_legs(rows).splitlines() if "AAPL" in line)
+
+    for expected in ("3.1%", "4,210", "12.5%", "88"):
+        assert expected in aapl
+
+
+def test_leg_table_marks_a_ticker_without_legs() -> None:
+    no_legs = {
+        "symbol": "NOPE",
+        "front_spread_pct": None,
+        "front_open_interest": None,
+        "back_spread_pct": None,
+        "back_open_interest": None,
+    }
+
+    line = next(ln for ln in COVERAGE.format_legs([no_legs]).splitlines() if "NOPE" in ln)
+
+    assert line.split()[1:] == ["-", "-", "-", "-"]
+
+
 def test_table_shows_each_rule_and_its_tickers() -> None:
     rows = [row("BIG", front=(0.30, 1_000), volume=10_000_000), row("ODD", iv_rv=3.5)]
 

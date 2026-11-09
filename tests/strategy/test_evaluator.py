@@ -12,6 +12,7 @@ from evbot.strategy.filters import (
     AVG_VOLUME,
     IV_RV,
     LIQUIDITY,
+    REPORT_TIMING,
     TERM_SLOPE,
     AvgVolumeFilter,
     IvRvFilter,
@@ -150,6 +151,17 @@ def test_empty_chain_gives_avoid_instead_of_raising() -> None:
 
     assert signal.verdict is Verdict.AVOID
     assert signal.metrics is None
+
+
+def test_unknown_timing_is_avoid_but_still_records_metrics() -> None:
+    event = EarningsEvent("AAPL", EVENT.report_date, ReportTiming.UNKNOWN)
+    context = MarketContext(event, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME))
+
+    signal = evaluator().evaluate(context)
+
+    assert signal.verdict is Verdict.AVOID
+    assert [result.name for result in signal.failed()] == [REPORT_TIMING]
+    assert signal.metrics is not None
 
 
 def test_as_of_comes_from_the_chain() -> None:

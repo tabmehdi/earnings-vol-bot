@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -92,6 +93,48 @@ def test_back_expiry_tie_goes_to_the_earlier_one() -> None:
 
     assert spread is not None
     assert spread.back.contract.expiry == date(2026, 12, 18)
+
+
+def test_front_atm_strike_without_a_back_match_uses_the_closest_shared_strike() -> None:
+    # Like CRWV: spot 48.6 is nearest 48.5, which only the weekly lists; 50 is in both.
+    chain = chain_of((FRONT, 48.5), (FRONT, 50.0), (BACK, 45.0), (BACK, 50.0))
+    spot_chain = replace(chain, spot=48.6)
+
+    spread = SpreadSelector(back_offset_days=30).select(spot_chain, EVENT)
+
+    assert spread is not None
+    assert spread.strike == 50.0
+
+
+def test_uses_the_shared_strike_closest_to_spot() -> None:
+    # Shared strikes are 95 and 105. |101 - 105| = 4 beats |101 - 95| = 6.
+    chain = chain_of((FRONT, 95.0), (FRONT, 100.0), (FRONT, 105.0), (BACK, 95.0), (BACK, 105.0))
+    spot_chain = replace(chain, spot=101.0)
+
+    spread = SpreadSelector(back_offset_days=30).select(spot_chain, EVENT)
+
+    assert spread is not None
+    assert spread.strike == 105.0
+
+
+def test_shared_strike_tie_goes_to_the_lower_strike() -> None:
+    # Spot 102.5 is 2.5 from both 100 and 105.
+    chain = chain_of((FRONT, 100.0), (FRONT, 105.0), (BACK, 100.0), (BACK, 105.0))
+
+    spread = SpreadSelector(back_offset_days=30).select(replace(chain, spot=102.5), EVENT)
+
+    assert spread is not None
+    assert spread.strike == 100.0
+
+
+def test_a_strike_listed_only_as_a_put_does_not_count() -> None:
+    back_put = OptionQuote(
+        OptionContract("AAPL", BACK, 100.0, OptionRight.PUT), 1.0, 1.1, None, 1_000, 10
+    )
+    calls = chain_of((FRONT, 100.0), (BACK, 110.0))
+    chain = replace(calls, quotes=(*calls.quotes, back_put))
+
+    assert SpreadSelector(back_offset_days=30).select(chain, EVENT) is None
 
 
 def test_none_when_back_expiry_lacks_the_front_strike() -> None:

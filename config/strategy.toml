@@ -23,3 +23,22 @@ iv_days = 30
 rv_window = 30
 volume_window = 30
 trading_days_per_year = 252
+
+[market_data]
+data_base_url = "https://data.alpaca.markets"
+trading_base_url = "https://paper-api.alpaca.markets"
+earnings_url = "https://api.nasdaq.com/api/calendar/earnings"
+options_feed = "indicative"    # quotes only; indicative trades are delayed 15 minutes
+spot_feed = "iex"
+history_feed = "sip"           # allowed on the free plan for completed sessions
+chain_max_days = 75
+strike_range_pct = 0.25        # requested strikes: spot +/- 25%
+max_quote_age_seconds = 300
+max_retries = 4
+backoff_seconds = 1.0
+timeout_seconds = 20.0
+alpaca_requests_per_minute = 180   # the free plan allows 200
+nasdaq_requests_per_minute = 30
+
+[storage]
+snapshot_dir = "data/snapshots"

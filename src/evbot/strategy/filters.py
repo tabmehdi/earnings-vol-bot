@@ -9,6 +9,7 @@ AVG_VOLUME = "avg_volume"
 IV_RV = "iv_rv"
 TERM_SLOPE = "term_slope"
 LIQUIDITY = "liquidity"
+REPORT_TIMING = "report_timing"
 
 
 @dataclass(frozen=True, slots=True)

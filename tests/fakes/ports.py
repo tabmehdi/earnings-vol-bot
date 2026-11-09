@@ -1,0 +1,91 @@
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from evbot.domain.events import EarningsEvent
+from evbot.domain.prices import PriceHistory
+from evbot.domain.snapshots import ChainSnapshot, DataFeeds
+from evbot.ports.errors import MarketDataError, SnapshotError, TradingCalendarError
+
+
+@dataclass(frozen=True, slots=True)
+class FixedClock:
+    moment: datetime
+
+    def now(self) -> datetime:
+        return self.moment
+
+
+@dataclass(frozen=True, slots=True)
+class FakeEarningsCalendar:
+    events: tuple[EarningsEvent, ...]
+
+    def events_on(self, day: date) -> tuple[EarningsEvent, ...]:
+        return tuple(event for event in self.events if event.report_date == day)
+
+
+@dataclass(frozen=True, slots=True)
+class FakeMarketData:
+    chains: dict[str, ChainSnapshot]
+    histories: dict[str, PriceHistory]
+
+    def get_chain(self, symbol: str) -> ChainSnapshot:
+        if symbol not in self.chains:
+            raise MarketDataError(f"no chain for {symbol}")
+        return self.chains[symbol]
+
+    def get_history(self, symbol: str, end: date, bars: int) -> PriceHistory:
+        if symbol not in self.histories:
+            raise MarketDataError(f"no history for {symbol}")
+        history = self.histories[symbol]
+        kept = tuple(bar for bar in history.bars if bar.day <= end)[-bars:]
+        return PriceHistory(symbol, kept)
+
+
+@dataclass(frozen=True, slots=True)
+class FakeTradingCalendar:
+    sessions: dict[date, tuple[datetime, datetime]]
+
+    def previous_session(self, day: date) -> date:
+        earlier = [session for session in self.sessions if session < day]
+        if not earlier:
+            raise TradingCalendarError(f"no session before {day}")
+        return max(earlier)
+
+    def next_session(self, day: date) -> date:
+        later = [session for session in self.sessions if session > day]
+        if not later:
+            raise TradingCalendarError(f"no session after {day}")
+        return min(later)
+
+    def open_time(self, day: date) -> datetime:
+        return self._session(day)[0]
+
+    def close_time(self, day: date) -> datetime:
+        return self._session(day)[1]
+
+    def _session(self, day: date) -> tuple[datetime, datetime]:
+        if day not in self.sessions:
+            raise TradingCalendarError(f"{day} is not a session")
+        return self.sessions[day]
+
+
+@dataclass(slots=True)
+class InMemorySnapshotStore:
+    chains: dict[tuple[str, datetime], ChainSnapshot] = field(default_factory=dict)
+    histories: dict[tuple[str, datetime], PriceHistory] = field(default_factory=dict)
+
+    def save_chain(self, snapshot: ChainSnapshot) -> None:
+        self.chains[(snapshot.chain.underlying, snapshot.chain.as_of)] = snapshot
+
+    def load_chain(self, symbol: str, as_of: datetime) -> ChainSnapshot:
+        if (symbol, as_of) not in self.chains:
+            raise SnapshotError(f"no chain for {symbol} at {as_of}")
+        return self.chains[(symbol, as_of)]
+
+    def save_history(self, history: PriceHistory, as_of: datetime, feeds: DataFeeds) -> None:
+        self.histories[(history.symbol, as_of)] = history
+
+    def load_history(self, symbol: str, as_of: datetime) -> PriceHistory:
+        if (symbol, as_of) not in self.histories:
+            raise SnapshotError(f"no history for {symbol} at {as_of}")
+        return self.histories[(symbol, as_of)]

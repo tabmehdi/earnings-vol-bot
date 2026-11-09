@@ -5,6 +5,9 @@ description = "Event-driven options bot that sells earnings IV crush with long c
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
+    "httpx>=0.28.1",
+    "pyarrow>=26.0.1",
+    "python-dotenv>=1.2.4",
     "tzdata>=2026.6",
 ]
 
@@ -33,6 +36,10 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 exclude = ["^docs/legacy/"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

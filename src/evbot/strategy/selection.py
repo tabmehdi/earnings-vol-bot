@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from evbot.domain.events import EarningsEvent, ReportTiming
-from evbot.domain.options import OptionChain, OptionContract, OptionRight
+from evbot.domain.options import OptionChain, OptionRight
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 
 
@@ -33,21 +33,18 @@ class SpreadSelector:
         # later is ascending and min keeps the first match, so a tie takes the earlier expiry.
         back = min(later, key=lambda expiry: abs((expiry - target).days))
 
-        strike = chain.atm_strike(front)
-        front_call = self._call(chain, front, strike)
-        back_call = self._call(chain, back, strike)
-        if front_call is None or back_call is None:
+        calls = {
+            (q.contract.expiry, q.contract.strike): q.contract
+            for q in chain.quotes
+            if q.contract.right is OptionRight.CALL
+        }
+        front_strikes = {strike for expiry, strike in calls if expiry == front}
+        back_strikes = {strike for expiry, strike in calls if expiry == back}
+        shared = front_strikes & back_strikes
+        if not shared:
             return None
-        return CalendarSpread(Leg(front_call, Side.SELL), Leg(back_call, Side.BUY))
-
-    @staticmethod
-    def _call(chain: OptionChain, expiry: date, strike: float) -> OptionContract | None:
-        for quote in chain.quotes:
-            contract = quote.contract
-            if (
-                contract.expiry == expiry
-                and contract.strike == strike
-                and contract.right is OptionRight.CALL
-            ):
-                return contract
-        return None
+        # Sorting first makes a tie between two strikes resolve to the lower one.
+        strike = min(sorted(shared), key=lambda k: abs(k - chain.spot))
+        return CalendarSpread(
+            Leg(calls[(front, strike)], Side.SELL), Leg(calls[(back, strike)], Side.BUY)
+        )

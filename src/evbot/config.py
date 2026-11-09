@@ -44,12 +44,37 @@ class MetricsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketDataConfig:
+    data_base_url: str
+    trading_base_url: str
+    earnings_url: str
+    options_feed: str
+    spot_feed: str
+    history_feed: str
+    chain_max_days: int
+    strike_range_pct: float
+    max_quote_age_seconds: int
+    max_retries: int
+    backoff_seconds: float
+    timeout_seconds: float
+    alpaca_requests_per_minute: int
+    nasdaq_requests_per_minute: int
+
+
+@dataclass(frozen=True, slots=True)
+class StorageConfig:
+    snapshot_dir: str
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyConfig:
     filters: FilterConfig
     structure: StructureConfig
     schedule: ScheduleConfig
     pricing: PricingConfig
     metrics: MetricsConfig
+    market_data: MarketDataConfig
+    storage: StorageConfig
 
 
 def config_path() -> Path:
@@ -67,4 +92,6 @@ def load_config(path: Path | None = None) -> StrategyConfig:
         schedule=ScheduleConfig(**raw["schedule"]),
         pricing=PricingConfig(**raw["pricing"]),
         metrics=MetricsConfig(**raw["metrics"]),
+        market_data=MarketDataConfig(**raw["market_data"]),
+        storage=StorageConfig(**raw["storage"]),
     )

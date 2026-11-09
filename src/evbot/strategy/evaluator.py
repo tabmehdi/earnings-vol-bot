@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 
-from evbot.domain.events import EarningsEvent
+from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionChain
 from evbot.domain.prices import PriceHistory
 from evbot.domain.signals import FilterResult, Signal, Verdict
-from evbot.strategy.filters import Filter, SignalCandidate
+from evbot.strategy.filters import REPORT_TIMING, Filter, SignalCandidate
 from evbot.strategy.metrics import MetricsCalculator
 from evbot.strategy.selection import SpreadSelector
 from evbot.strategy.verdict import VerdictPolicy
@@ -31,14 +31,23 @@ class SignalEvaluator:
 
     def evaluate(self, context: MarketContext) -> Signal:
         event, chain = context.event, context.chain
+        spread = self.selector.select(chain, event)
+        recorded: tuple[FilterResult, ...] = ()
+        if event.timing is ReportTiming.UNKNOWN:
+            recorded += (
+                FilterResult(REPORT_TIMING, False, None, None, detail="report timing not supplied"),
+            )
         try:
             metrics = self.metrics.compute(chain, context.history, event)
         except ValueError as error:
             # Every decision is persisted, so bad inputs become an explained AVOID, not a gap.
             reason = FilterResult("metrics", False, None, None, detail=str(error))
-            return Signal(event, chain.as_of, None, (reason,), Verdict.AVOID, spread=None)
+            return Signal(event, chain.as_of, None, (reason, *recorded), Verdict.AVOID, spread)
 
-        spread = self.selector.select(chain, event)
         candidate = SignalCandidate(metrics, chain, spread)
         results = tuple(check.check(candidate) for check in self.filters)
-        return Signal(event, chain.as_of, metrics, results, self.policy.decide(results), spread)
+        # Without a known timing we cannot tell which session to enter, whatever the metrics say.
+        verdict = (
+            Verdict.AVOID if event.timing is ReportTiming.UNKNOWN else self.policy.decide(results)
+        )
+        return Signal(event, chain.as_of, metrics, (*results, *recorded), verdict, spread)

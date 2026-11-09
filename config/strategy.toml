@@ -21,6 +21,7 @@ iv_days = 30
 rv_window = 30
 volume_window = 30
 trading_days_per_year = 252
+max_iv_input_spread_pct = 0.50  # a wider quote has no meaningful mid to solve an IV from
 
 [market_data]
 data_base_url = "https://data.alpaca.markets"

@@ -11,6 +11,7 @@ TERM_SLOPE = "term_slope"
 SPREAD_AVAILABLE = "spread_available"
 LIQUIDITY = "liquidity"
 REPORT_TIMING = "report_timing"
+UNRELIABLE_QUOTES = "unreliable_quotes"
 
 
 @dataclass(frozen=True, slots=True)

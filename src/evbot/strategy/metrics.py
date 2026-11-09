@@ -18,6 +18,10 @@ MARKET_TIMEZONE = ZoneInfo("America/New_York")
 EXPIRY_TIME = time(16, 0)
 
 
+class UnreliableQuotesError(ValueError):
+    """The front expiry's quotes are too wide for their mids to mean anything."""
+
+
 def days_to_expiry(as_of: datetime, expiry: date) -> float:
     """Calendar days, with the fraction, from as_of to the 16:00 New York close on expiry."""
     expires_at = datetime.combine(expiry, EXPIRY_TIME, MARKET_TIMEZONE)
@@ -37,6 +41,7 @@ class MetricsCalculator:
     iv_days: int
     volume_window: int
     slope_horizon_days: int
+    max_iv_input_spread_pct: float
 
     def compute(
         self, chain: OptionChain, history: PriceHistory, event: EarningsEvent
@@ -69,22 +74,34 @@ class MetricsCalculator:
                 points.append((days_to_expiry(chain.as_of, expiry), atm_iv))
             elif expiry == front:
                 # Starting at a later expiry would measure a slope without the earnings move.
-                raise ValueError(f"no solvable ATM IV for front expiry {front}")
+                raise self._front_failure(chain, front)
         return TermStructure(tuple(points))
 
     def _solved_atm_iv(self, chain: OptionChain, expiry: date, rate: float) -> float | None:
+        usable = [
+            quote
+            for quote in self._at_the_money(chain, expiry)
+            if quote.spread_pct <= self.max_iv_input_spread_pct
+        ]
+        solved = [iv for iv in (self._solve(chain, q, rate) for q in usable) if iv is not None]
+        return sum(solved) / len(solved) if solved else None
+
+    @staticmethod
+    def _at_the_money(chain: OptionChain, expiry: date) -> list[OptionQuote]:
         strike = chain.atm_strike(expiry)
-        at_the_money = [
+        return [
             quote
             for quote in chain.quotes
             if quote.contract.expiry == expiry and quote.contract.strike == strike
         ]
-        solved = [
-            iv
-            for iv in (self._solve(chain, quote, rate) for quote in at_the_money)
-            if iv is not None
-        ]
-        return sum(solved) / len(solved) if solved else None
+
+    def _front_failure(self, chain: OptionChain, front: date) -> ValueError:
+        quotes = self._at_the_money(chain, front)
+        if all(quote.spread_pct > self.max_iv_input_spread_pct for quote in quotes):
+            spreads = ", ".join(f"{q.contract.right.value} {q.spread_pct:.1%}" for q in quotes)
+            limit = f"{self.max_iv_input_spread_pct:.0%}"
+            return UnreliableQuotesError(f"front expiry {front} ATM spreads {spreads} over {limit}")
+        return ValueError(f"no solvable ATM IV for front expiry {front}")
 
     def _solve(self, chain: OptionChain, quote: OptionQuote, rate: float) -> float | None:
         return self.solver.solve(

@@ -63,6 +63,7 @@ def evaluator() -> SignalEvaluator:
             iv_days=config.metrics.iv_days,
             volume_window=config.metrics.volume_window,
             slope_horizon_days=filters.term_slope_horizon_days,
+            max_iv_input_spread_pct=config.metrics.max_iv_input_spread_pct,
         ),
         selector=SpreadSelector(config.structure.back_expiry_offset_days),
         filters=(
@@ -195,6 +196,19 @@ def test_unknown_timing_is_avoid_but_still_records_metrics_and_liquidity() -> No
     assert signal.verdict is Verdict.AVOID
     assert [result.name for result in signal.failed()] == [REPORT_TIMING]
     assert signal.metrics is not None
+    assert "front_open_interest" in liquidity_result(signal).detail
+
+
+def test_unusable_front_quotes_give_avoid_naming_the_spread() -> None:
+    # half spread 30% of mid: spread_pct = 60%, above the 50% limit for IV inputs
+    signal = evaluate(
+        build_chain(BACKWARDATED, half_spread=0.30), build_history(CALM, LIQUID_VOLUME)
+    )
+
+    assert signal.verdict is Verdict.AVOID
+    assert signal.metrics is None
+    assert [result.name for result in signal.failed()] == ["unreliable_quotes"]
+    assert "60.0%" in signal.failed()[0].detail
     assert "front_open_interest" in liquidity_result(signal).detail
 
 

@@ -8,10 +8,16 @@ from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionChain, OptionQuote, OptionRight
 from evbot.domain.prices import Bar, PriceHistory
 from evbot.strategy.implied_vol import ImpliedVolSolver, black_scholes_price
-from evbot.strategy.metrics import MetricsCalculator, days_to_expiry, years_to_expiry
+from evbot.strategy.metrics import (
+    MetricsCalculator,
+    UnreliableQuotesError,
+    days_to_expiry,
+    years_to_expiry,
+)
 from evbot.strategy.rates import ConstantRate
 from tests.fixtures.market import (
     AS_OF,
+    BACK,
     BACKWARDATED,
     EVENT,
     FRONT,
@@ -42,6 +48,7 @@ def calculator(rv: float = 0.25, volume_window: int = 30) -> MetricsCalculator:
         iv_days=30,
         volume_window=volume_window,
         slope_horizon_days=45,
+        max_iv_input_spread_pct=0.50,
     )
 
 
@@ -175,6 +182,53 @@ def test_raises_when_the_front_expiry_cannot_be_solved() -> None:
     chain = OptionChain("AAPL", SPOT, AS_OF, (*dead, *later))
 
     with pytest.raises(ValueError):
+        calculator().compute(chain, HISTORY, EVENT)
+
+
+def widened(quote: OptionQuote, half_spread: float) -> OptionQuote:
+    return replace(quote, bid=quote.mid * (1 - half_spread), ask=quote.mid * (1 + half_spread))
+
+
+def test_a_wide_side_is_ignored_and_the_other_side_used() -> None:
+    # Front call has a 60% spread, so front = put = 0.30; IV45 is flat at 0.60
+    # slope = (0.60 - 0.30) / (45 - 1.0104167) = 0.00681979
+    call, put = straddle(FRONT, 0.50, 0.30)
+    chain = OptionChain(
+        "AAPL", SPOT, AS_OF, (widened(call, 0.30), put, *straddle(WEEK, 0.60, 0.60))
+    )
+
+    metrics = calculator().compute(chain, HISTORY, EVENT)
+
+    assert metrics.term_slope == pytest.approx(0.00681979, abs=1e-6)
+
+
+def test_a_spread_exactly_at_the_limit_is_usable() -> None:
+    # Bid 3, ask 5: (5 - 3) / 4 = 0.50 exactly.
+    call, put = straddle(FRONT, 0.50, 0.30)
+    front = (replace(call, bid=3.0, ask=5.0), replace(put, bid=3.0, ask=5.0))
+    chain = OptionChain("AAPL", SPOT, AS_OF, (*front, *straddle(WEEK, 0.60, 0.60)))
+
+    calculator().compute(chain, HISTORY, EVENT)
+
+
+def test_a_later_expiry_with_only_wide_quotes_has_no_iv_point() -> None:
+    # Week is skipped, leaving 1.0104167 days / 0.90 and 29.0104167 days / 0.50; IV45 is flat
+    # slope = (0.50 - 0.90) / (45 - 1.0104167) = -0.00909306
+    wide_week = tuple(widened(q, 0.30) for q in straddle(WEEK, 0.60, 0.60))
+    quotes = (*straddle(FRONT, 0.90, 0.90), *wide_week, *straddle(BACK, 0.50, 0.50))
+    chain = OptionChain("AAPL", SPOT, AS_OF, quotes)
+
+    metrics = calculator().compute(chain, HISTORY, EVENT)
+
+    assert metrics.term_slope == pytest.approx(-0.00909306, abs=1e-6)
+
+
+def test_front_expiry_with_only_wide_quotes_names_the_spreads() -> None:
+    wide_front = tuple(widened(q, 0.30) for q in straddle(FRONT, 0.50, 0.50))
+    quotes = (*wide_front, *straddle(WEEK, 0.60, 0.60), *straddle(BACK, 0.5, 0.5))
+    chain = OptionChain("AAPL", SPOT, AS_OF, quotes)
+
+    with pytest.raises(UnreliableQuotesError, match=r"call 60\.0%.*put 60\.0%"):
         calculator().compute(chain, HISTORY, EVENT)
 
 

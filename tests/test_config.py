@@ -44,6 +44,7 @@ def test_default_config_loads_pricing_and_metrics(monkeypatch: pytest.MonkeyPatc
     assert config.metrics.rv_window == 30
     assert config.metrics.volume_window == 30
     assert config.metrics.trading_days_per_year == 252
+    assert config.metrics.max_iv_input_spread_pct == 0.50
 
 
 def test_default_config_loads_market_data_and_storage(monkeypatch: pytest.MonkeyPatch) -> None:

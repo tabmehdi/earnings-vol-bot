@@ -50,6 +50,7 @@ def build_evaluator(config: StrategyConfig) -> SignalEvaluator:
             iv_days=config.metrics.iv_days,
             volume_window=config.metrics.volume_window,
             slope_horizon_days=filters.term_slope_horizon_days,
+            max_iv_input_spread_pct=config.metrics.max_iv_input_spread_pct,
         ),
         selector=SpreadSelector(config.structure.back_expiry_offset_days),
         filters=(

@@ -39,6 +39,7 @@ class MetricsConfig:
     rv_window: int
     volume_window: int
     trading_days_per_year: int
+    max_iv_input_spread_pct: float
 
 
 @dataclass(frozen=True, slots=True)

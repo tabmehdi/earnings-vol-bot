@@ -4,8 +4,14 @@ from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionChain
 from evbot.domain.prices import PriceHistory
 from evbot.domain.signals import FilterResult, Signal, Verdict
-from evbot.strategy.filters import REPORT_TIMING, Filter, LiquidityFilter, SignalCandidate
-from evbot.strategy.metrics import MetricsCalculator
+from evbot.strategy.filters import (
+    REPORT_TIMING,
+    UNRELIABLE_QUOTES,
+    Filter,
+    LiquidityFilter,
+    SignalCandidate,
+)
+from evbot.strategy.metrics import MetricsCalculator, UnreliableQuotesError
 from evbot.strategy.selection import SpreadSelector
 from evbot.strategy.verdict import VerdictPolicy
 
@@ -42,7 +48,8 @@ class SignalEvaluator:
             metrics = self.metrics.compute(chain, context.history, event)
         except ValueError as error:
             # Every decision is persisted, so bad inputs become an explained AVOID, not a gap.
-            reason = FilterResult("metrics", False, None, None, detail=str(error))
+            name = UNRELIABLE_QUOTES if isinstance(error, UnreliableQuotesError) else "metrics"
+            reason = FilterResult(name, False, None, None, detail=str(error))
             return Signal(event, chain.as_of, None, (reason, *recorded), Verdict.AVOID, spread)
 
         candidate = SignalCandidate(metrics, chain, spread)

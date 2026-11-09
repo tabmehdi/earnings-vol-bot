@@ -101,6 +101,19 @@ def test_unknown_timing_is_shown_as_avoid_with_the_reason() -> None:
     assert "report_timing" in [result.name for result in signal.failed()]
 
 
+def test_given_tickers_are_scanned_as_reporting_next_session() -> None:
+    preview, _ = preview_for(())
+
+    universe = preview.universe_for(("AAPL", "MSFT"))
+
+    assert universe.today_events == ()
+    assert [(e.symbol, e.report_date) for e in universe.selected] == [
+        ("AAPL", FRONT),
+        ("MSFT", FRONT),
+    ]
+    assert all(e.timing is ReportTiming.BMO for e in universe.selected)
+
+
 def test_evaluates_the_selected_reports() -> None:
     report, _ = run((AAPL,))
 

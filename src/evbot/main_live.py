@@ -1,10 +1,12 @@
 """Composition root for the live bot: wires concrete adapters into the app services."""
 
 import argparse
+import json
 import os
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -19,9 +21,11 @@ from evbot.adapters.rate_limiter import TokenBucket
 from evbot.app.scan_preview import PreviewLine, PreviewReport, ScanPreview, ScanUniverse
 from evbot.config import MarketDataConfig, StrategyConfig, load_config
 from evbot.domain.events import EarningsEvent, ReportTiming
+from evbot.domain.signals import Signal
 from evbot.domain.snapshots import DataFeeds
 from evbot.strategy.evaluator import SignalEvaluator
 from evbot.strategy.filters import (
+    LIQUIDITY,
     AvgVolumeFilter,
     IvRvFilter,
     LiquidityFilter,
@@ -104,6 +108,45 @@ def build_preview(
     )
 
 
+def parse_tickers(text: str) -> tuple[str, ...]:
+    return tuple(ticker.strip().upper() for ticker in text.split(",") if ticker.strip())
+
+
+def scan_log_row(line: PreviewLine) -> dict[str, Any]:
+    signal = line.signal
+    metrics = signal.metrics if signal else None
+    legs = _leg_liquidity(signal) if signal else {}
+    return {
+        "symbol": line.event.symbol,
+        "report_date": line.event.report_date.isoformat(),
+        "timing": line.event.timing.value,
+        "as_of": signal.as_of.isoformat() if signal else None,
+        "verdict": signal.verdict.value if signal else None,
+        "avg_volume_30d": metrics.avg_volume_30d if metrics else None,
+        "iv30_rv30": metrics.iv30_rv30 if metrics else None,
+        "term_slope": metrics.term_slope if metrics else None,
+        "front_spread_pct": legs.get("front_spread_pct"),
+        "front_open_interest": legs.get("front_open_interest"),
+        "back_spread_pct": legs.get("back_spread_pct"),
+        "back_open_interest": legs.get("back_open_interest"),
+        "failed": [result.name for result in signal.failed()] if signal else [],
+        "stale_quotes_dropped": line.stale_quotes_dropped,
+        "error": line.error,
+    }
+
+
+def _leg_liquidity(signal: Signal) -> dict[str, float | int]:
+    detail = next((r.detail for r in signal.filters if r.name == LIQUIDITY), "")
+    pairs = (item.split("=") for item in detail.split() if "=" in item)
+    return {key: int(value) if key.endswith("interest") else float(value) for key, value in pairs}
+
+
+def write_scan_log(report: PreviewReport, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = (json.dumps(scan_log_row(line)) for line in report.lines)
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
 def format_universe(universe: ScanUniverse) -> str:
     return "\n".join(
         [
@@ -165,7 +208,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         "preview", help="print this scan's earnings tickers with live metrics; never trades"
     )
     preview_command.add_argument("--limit", type=int, help="only evaluate the first N tickers")
+    preview_command.add_argument(
+        "--tickers", help="comma-separated symbols to scan as if they report next session"
+    )
     args = parser.parse_args(argv)
+    tickers = parse_tickers(args.tickers) if args.tickers is not None else None
+    if tickers is not None and not tickers:
+        parser.error("--tickers needs at least one symbol")
 
     load_dotenv()
     key_id = os.environ.get("ALPACA_API_KEY")
@@ -181,10 +230,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         alpaca_http = build_http(market, client, market.alpaca_requests_per_minute)
         nasdaq_http = build_http(market, client, market.nasdaq_requests_per_minute)
         preview = build_preview(config, clock, alpaca_http, nasdaq_http, key_id, secret_key)
-        universe = preview.find_reports()
+        universe = preview.universe_for(tickers) if tickers else preview.find_reports()
         print(format_universe(universe), flush=True)
         report = preview.evaluate(universe, args.limit)
     print(format_report(report))
+    prefix = "tickers" if tickers else "scan"
+    log_dir = Path(config.storage.snapshot_dir) / "signals" / f"date={started:%Y-%m-%d}"
+    write_scan_log(report, log_dir / f"{prefix}_{started:%H%M%S}.jsonl")
     seconds = (clock.now() - started).total_seconds()
     print(format_run_stats(alpaca_http.request_count, nasdaq_http.request_count, seconds))
 

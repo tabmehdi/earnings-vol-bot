@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -64,6 +65,13 @@ class ScanPreview:
             self.earnings.events_on(today),
             self.earnings.events_on(next_session),
         )
+
+    def universe_for(self, tickers: Sequence[str]) -> ScanUniverse:
+        """Scans chosen tickers as if they report before the open next session."""
+        today = self.clock.now().date()
+        next_session = self.trading_calendar.next_session(today)
+        events = tuple(EarningsEvent(t, next_session, ReportTiming.BMO) for t in tickers)
+        return ScanUniverse(today, next_session, (), events)
 
     def evaluate(self, universe: ScanUniverse, limit: int | None = None) -> PreviewReport:
         last_completed = self.trading_calendar.previous_session(universe.today)

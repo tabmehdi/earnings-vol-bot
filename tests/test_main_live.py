@@ -1,4 +1,6 @@
+import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +74,70 @@ def test_run_stats_show_requests_per_source_and_duration() -> None:
     assert "alpaca 700" in text
     assert "nasdaq 2" in text
     assert "78.2" in text
+
+
+def test_parse_tickers_cleans_the_list() -> None:
+    assert main_live.parse_tickers(" aapl, MSFT,,nvda ") == ("AAPL", "MSFT", "NVDA")
+
+
+def test_tickers_option_with_no_symbols_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(main_live, "load_dotenv", lambda: False)
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+
+    with pytest.raises(SystemExit):
+        main_live.main(["preview", "--tickers", " , "])
+
+    assert "--tickers" in capsys.readouterr().err
+
+
+def scanned_line() -> PreviewLine:
+    metrics = SignalMetrics(avg_volume_30d=2_000_000, iv30_rv30=1.5, term_slope=-0.006)
+    liquidity = FilterResult(
+        "liquidity",
+        True,
+        None,
+        None,
+        detail=(
+            "front_spread_pct=0.1380 front_open_interest=317 "
+            "back_spread_pct=inf back_open_interest=3"
+        ),
+    )
+    signal = Signal(EVENT, AS_OF, metrics, (liquidity,), Verdict.CONSIDER, spread=None)
+    return PreviewLine(EVENT, signal, stale_quotes_dropped=1, error="")
+
+
+def test_scan_log_records_verdict_metrics_and_both_legs() -> None:
+    row = main_live.scan_log_row(scanned_line())
+
+    assert row["symbol"] == "AAPL"
+    assert row["timing"] == "bmo"
+    assert row["verdict"] == "consider"
+    assert row["avg_volume_30d"] == 2_000_000
+    assert row["front_spread_pct"] == 0.138
+    assert row["front_open_interest"] == 317
+    assert row["back_spread_pct"] == float("inf")
+    assert row["back_open_interest"] == 3
+
+
+def test_scan_log_row_for_a_failed_ticker_has_no_legs() -> None:
+    row = main_live.scan_log_row(PreviewLine(EVENT, None, None, error="AAPL: HTTP 403"))
+
+    assert row["error"] == "AAPL: HTTP 403"
+    assert row["verdict"] is None
+    assert row["front_spread_pct"] is None
+
+
+def test_write_scan_log_writes_one_json_line_per_ticker(tmp_path: Path) -> None:
+    path = tmp_path / "signals" / "date=2026-11-09" / "scan_100000.jsonl"
+
+    main_live.write_scan_log(PreviewReport((scanned_line(), scanned_line())), path)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["symbol"] == "AAPL"
 
 
 def test_preview_refuses_to_start_without_keys(

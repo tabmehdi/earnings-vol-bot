@@ -15,8 +15,6 @@ class FilterConfig:
     min_iv30_rv30: float
     max_term_slope: float
     term_slope_horizon_days: int
-    max_leg_spread_pct: float
-    min_open_interest: int
 
 
 @dataclass(frozen=True, slots=True)

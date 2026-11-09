@@ -4,7 +4,7 @@ from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionChain
 from evbot.domain.prices import PriceHistory
 from evbot.domain.signals import FilterResult, Signal, Verdict
-from evbot.strategy.filters import REPORT_TIMING, Filter, SignalCandidate
+from evbot.strategy.filters import REPORT_TIMING, Filter, LiquidityFilter, SignalCandidate
 from evbot.strategy.metrics import MetricsCalculator
 from evbot.strategy.selection import SpreadSelector
 from evbot.strategy.verdict import VerdictPolicy
@@ -27,12 +27,13 @@ class SignalEvaluator:
     metrics: MetricsCalculator
     selector: SpreadSelector
     filters: tuple[Filter, ...]
+    liquidity: LiquidityFilter
     policy: VerdictPolicy
 
     def evaluate(self, context: MarketContext) -> Signal:
         event, chain = context.event, context.chain
         spread = self.selector.select(chain, event)
-        recorded: tuple[FilterResult, ...] = ()
+        recorded: tuple[FilterResult, ...] = (self.liquidity.describe(chain, spread),)
         if event.timing is ReportTiming.UNKNOWN:
             recorded += (
                 FilterResult(REPORT_TIMING, False, None, None, detail="report timing not supplied"),

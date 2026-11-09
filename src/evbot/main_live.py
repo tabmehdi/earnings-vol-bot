@@ -25,6 +25,7 @@ from evbot.strategy.filters import (
     AvgVolumeFilter,
     IvRvFilter,
     LiquidityFilter,
+    SpreadAvailableFilter,
     TermSlopeFilter,
 )
 from evbot.strategy.implied_vol import ImpliedVolSolver
@@ -55,8 +56,9 @@ def build_evaluator(config: StrategyConfig) -> SignalEvaluator:
             AvgVolumeFilter(filters.min_avg_volume_30d),
             IvRvFilter(filters.min_iv30_rv30),
             TermSlopeFilter(filters.max_term_slope),
-            LiquidityFilter(filters.max_leg_spread_pct, filters.min_open_interest),
+            SpreadAvailableFilter(),
         ),
+        liquidity=LiquidityFilter(),
         policy=DefaultVerdictPolicy(),
     )
 

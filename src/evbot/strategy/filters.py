@@ -8,6 +8,7 @@ from evbot.domain.spreads import CalendarSpread
 AVG_VOLUME = "avg_volume"
 IV_RV = "iv_rv"
 TERM_SLOPE = "term_slope"
+SPREAD_AVAILABLE = "spread_available"
 LIQUIDITY = "liquidity"
 REPORT_TIMING = "report_timing"
 
@@ -51,19 +52,29 @@ class TermSlopeFilter:
 
 
 @dataclass(frozen=True, slots=True)
-class LiquidityFilter:
-    max_spread_pct: float
-    min_open_interest: int
-
+class SpreadAvailableFilter:
     def check(self, candidate: SignalCandidate) -> FilterResult:
-        spread = candidate.spread
-        if spread is None:
+        if candidate.spread is None:
             return FilterResult(
-                LIQUIDITY, False, None, self.max_spread_pct, detail="no valid calendar spread"
+                SPREAD_AVAILABLE, False, None, None, detail="no strike listed in both expiries"
             )
-        quotes = [candidate.chain.quote(leg.contract) for leg in (spread.front, spread.back)]
-        worst_spread = max(quote.spread_pct for quote in quotes)
-        lowest_interest = min(quote.open_interest for quote in quotes)
-        passed = worst_spread <= self.max_spread_pct and lowest_interest >= self.min_open_interest
-        detail = f"lowest open interest {lowest_interest}, minimum {self.min_open_interest}"
-        return FilterResult(LIQUIDITY, passed, worst_spread, self.max_spread_pct, detail)
+        return FilterResult(SPREAD_AVAILABLE, True, None, None)
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidityFilter:
+    """Records both legs' spread and open interest; informational, so it always passes (ADR 0004).
+
+    It is separate from the Filter protocol because it needs no metrics: a Signal whose
+    metrics could not be computed still records it.
+    """
+
+    def describe(self, chain: OptionChain, spread: CalendarSpread | None) -> FilterResult:
+        if spread is None:
+            return FilterResult(LIQUIDITY, True, None, None, detail="no calendar spread")
+        front, back = chain.quote(spread.front.contract), chain.quote(spread.back.contract)
+        detail = (
+            f"front_spread_pct={front.spread_pct:.4f} front_open_interest={front.open_interest} "
+            f"back_spread_pct={back.spread_pct:.4f} back_open_interest={back.open_interest}"
+        )
+        return FilterResult(LIQUIDITY, True, None, None, detail=detail)

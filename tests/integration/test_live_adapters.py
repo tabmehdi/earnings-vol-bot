@@ -5,11 +5,12 @@ from datetime import timedelta
 
 import httpx
 import pytest
+import requests
 from dotenv import load_dotenv
 
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
-from evbot.adapters.http_client import JsonHttpClient
+from evbot.adapters.http_client import JsonHttpClient, RequestsJsonHttpClient
 from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.config import load_config
@@ -55,7 +56,10 @@ def market_data(http: JsonHttpClient, keys: tuple[str, str]) -> AlpacaMarketData
     )
 
 
-def test_nasdaq_returns_a_list_for_the_coming_week(http: JsonHttpClient) -> None:
+def test_nasdaq_returns_a_list_for_the_coming_week() -> None:
+    http = RequestsJsonHttpClient(
+        requests.Session(), CONFIG.timeout_seconds, CONFIG.max_retries, CONFIG.backoff_seconds
+    )
     calendar = NasdaqEarningsCalendar(http, CONFIG.earnings_url)
     today = MarketClock().now().date()
 

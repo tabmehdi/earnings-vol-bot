@@ -10,11 +10,12 @@ from datetime import date
 from pathlib import Path
 
 import httpx
+import requests
 from dotenv import load_dotenv
 
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
-from evbot.adapters.http_client import JsonHttpClient
+from evbot.adapters.http_client import JsonHttpClient, RequestsJsonHttpClient, RetryingJsonClient
 from evbot.adapters.jsonl_trade_repository import JsonlTradeRepository
 from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
@@ -85,11 +86,25 @@ def build_http(
     return JsonHttpClient(client, config.max_retries, config.backoff_seconds, limiter=limiter)
 
 
+def build_nasdaq_http(
+    config: MarketDataConfig, session: requests.Session
+) -> RequestsJsonHttpClient:
+    """Nasdaq gets its own requests session: it rejects httpx with 403, and sharing nothing
+    with the Alpaca client means no Alpaca header can ever be sent to Nasdaq."""
+    return RequestsJsonHttpClient(
+        session,
+        config.timeout_seconds,
+        config.max_retries,
+        config.backoff_seconds,
+        limiter=TokenBucket(config.nasdaq_requests_per_minute),
+    )
+
+
 def build_scanner(
     config: StrategyConfig,
     clock: MarketClock,
     alpaca_http: JsonHttpClient,
-    nasdaq_http: JsonHttpClient,
+    nasdaq_http: RetryingJsonClient,
     key_id: str,
     secret_key: str,
 ) -> Scanner:
@@ -225,9 +240,12 @@ def _run_preview(
         print(TICKERS_WARNING, flush=True)
     market = config.market_data
     clock = MarketClock()
-    with httpx.Client(timeout=market.timeout_seconds) as client:
+    with (
+        httpx.Client(timeout=market.timeout_seconds) as client,
+        requests.Session() as nasdaq_session,
+    ):
         alpaca_http = build_http(market, client, market.alpaca_requests_per_minute)
-        nasdaq_http = build_http(market, client, market.nasdaq_requests_per_minute)
+        nasdaq_http = build_nasdaq_http(market, nasdaq_session)
         scanner = build_scanner(config, clock, alpaca_http, nasdaq_http, key_id, secret_key)
         universe = scanner.universe_for(tickers) if tickers else scanner.find_reports()
         print(format_universe(universe), flush=True)
@@ -262,9 +280,12 @@ def _scheduled_scan(
 ) -> None:
     logger.info("scan started for %s", today)
     market = config.market_data
-    with httpx.Client(timeout=market.timeout_seconds) as client:
+    with (
+        httpx.Client(timeout=market.timeout_seconds) as client,
+        requests.Session() as nasdaq_session,
+    ):
         alpaca_http = build_http(market, client, market.alpaca_requests_per_minute)
-        nasdaq_http = build_http(market, client, market.nasdaq_requests_per_minute)
+        nasdaq_http = build_nasdaq_http(market, nasdaq_session)
         scanner = build_scanner(config, clock, alpaca_http, nasdaq_http, key_id, secret_key)
         reason = scanner.skip_reason()
         if reason is not None:

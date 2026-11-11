@@ -26,6 +26,7 @@ class StructureConfig:
 class ScheduleConfig:
     entry_minutes_before_close: int
     exit_minutes_after_open: int
+    scan_start: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,9 @@ class MarketDataConfig:
 @dataclass(frozen=True, slots=True)
 class StorageConfig:
     snapshot_dir: str
+    signals_dir: str
+    logs_dir: str
+    locks_dir: str
 
 
 @dataclass(frozen=True, slots=True)

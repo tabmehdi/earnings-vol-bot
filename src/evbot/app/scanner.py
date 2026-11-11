@@ -1,0 +1,122 @@
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime
+
+from evbot.app.trade_scheduler import TradeScheduler
+from evbot.domain.events import EarningsEvent, ReportTiming
+from evbot.domain.scans import ScanKind, ScanRecord
+from evbot.domain.signals import FilterResult, Signal, Verdict
+from evbot.ports.clock import Clock
+from evbot.ports.earnings_calendar import EarningsCalendar
+from evbot.ports.errors import PortError, TradingCalendarError
+from evbot.ports.market_data import MarketDataProvider
+from evbot.ports.snapshot_store import SnapshotStore
+from evbot.ports.trade_repository import TradeRepository
+from evbot.ports.trading_calendar import TradingCalendar
+from evbot.strategy.evaluator import MarketContext, SignalEvaluator
+
+MARKET_DATA = "market_data"
+QUOTE_FRESHNESS = "quote_freshness"
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ScanUniverse:
+    today: date
+    next_session: date
+    today_events: tuple[EarningsEvent, ...]
+    next_session_events: tuple[EarningsEvent, ...]
+
+    @property
+    def selected(self) -> tuple[EarningsEvent, ...]:
+        """What an afternoon scan trades: AMC reports today, BMO reports next session.
+
+        UNKNOWN reports from the next session are kept so they are recorded as an explained AVOID.
+        """
+        amc_today = (e for e in self.today_events if e.timing is ReportTiming.AMC)
+        next_morning = (e for e in self.next_session_events if e.timing is not ReportTiming.AMC)
+        return (*amc_today, *next_morning)
+
+
+@dataclass(frozen=True, slots=True)
+class Scanner:
+    """Evaluates the scan's earnings reports, saves chains and the scan record. Never trades."""
+
+    clock: Clock
+    trading_calendar: TradingCalendar
+    earnings: EarningsCalendar
+    market_data: MarketDataProvider
+    store: SnapshotStore
+    repository: TradeRepository
+    evaluator: SignalEvaluator
+    scheduler: TradeScheduler
+    history_bars: int
+
+    def skip_reason(self) -> str | None:
+        """Why the scheduled scan should not run now, or None if it should."""
+        today = self.clock.now().date()
+        try:
+            self.trading_calendar.close_time(today)
+        except TradingCalendarError:
+            return f"{today} is not a trading session"
+        if any(scan.kind is ScanKind.SCHEDULED for scan in self.repository.scans_on(today)):
+            return f"a scheduled scan is already recorded for {today}"
+        return None
+
+    def find_reports(self) -> ScanUniverse:
+        today = self.clock.now().date()
+        next_session = self.trading_calendar.next_session(today)
+        return ScanUniverse(
+            today,
+            next_session,
+            self.earnings.events_on(today),
+            self.earnings.events_on(next_session),
+        )
+
+    def universe_for(self, tickers: Sequence[str]) -> ScanUniverse:
+        """Scans chosen tickers as if they report before the open next session."""
+        today = self.clock.now().date()
+        next_session = self.trading_calendar.next_session(today)
+        events = tuple(EarningsEvent(t, next_session, ReportTiming.BMO) for t in tickers)
+        return ScanUniverse(today, next_session, (), events)
+
+    def run(self, universe: ScanUniverse, kind: ScanKind, limit: int | None = None) -> ScanRecord:
+        started = self.clock.now()
+        last_completed = self.trading_calendar.previous_session(universe.today)
+        events = universe.selected[:limit]
+        signals = tuple(self._signal(event, last_completed) for event in events)
+        record = ScanRecord(kind, started, self.clock.now(), signals, self._entry_deadline(events))
+        self.repository.save_scan(record)
+        return record
+
+    def _signal(self, event: EarningsEvent, last_completed: date) -> Signal:
+        symbol = event.symbol
+        try:
+            snapshot = self.market_data.get_chain(symbol)
+            history = self.market_data.get_history(symbol, last_completed, self.history_bars)
+            self.store.save_chain(snapshot)
+            self.store.save_history(history, snapshot.chain.as_of, snapshot.feeds)
+        except PortError as error:
+            logger.warning("%s: %s", symbol, error)
+            reason = FilterResult(MARKET_DATA, False, None, None, detail=str(error))
+            return Signal(event, self.clock.now(), None, (reason,), Verdict.AVOID, spread=None)
+        signal = self.evaluator.evaluate(MarketContext(event, snapshot.chain, history))
+        freshness = FilterResult(
+            QUOTE_FRESHNESS,
+            True,
+            None,
+            None,
+            detail=f"stale_quotes_dropped={snapshot.stale_quotes_dropped}",
+        )
+        return replace(signal, filters=(*signal.filters, freshness))
+
+    def _entry_deadline(self, events: Sequence[EarningsEvent]) -> datetime | None:
+        entries = []
+        for event in events:
+            try:
+                entries.append(self.scheduler.window_for(event).entry_at)
+            except (TradingCalendarError, ValueError):
+                continue  # unknown timing or no session: nothing to enter, so no deadline
+        return min(entries, default=None)

@@ -137,10 +137,36 @@ def test_table_shows_each_rule_and_its_tickers() -> None:
     assert "BIG" in table and "ODD" in table
 
 
-def test_latest_scan_ignores_ticker_runs(tmp_path: Path) -> None:
-    day = tmp_path / "signals" / "date=2026-11-09"
-    day.mkdir(parents=True)
-    (day / "scan_100000.jsonl").write_text("", encoding="utf-8")
-    (day / "tickers_110000.jsonl").write_text("", encoding="utf-8")
+def touch(path: Path, text: str = "") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
 
-    assert COVERAGE.latest_scan(tmp_path).name == "scan_100000.jsonl"
+
+def test_latest_scan_prefers_the_newest_scheduled_scan(tmp_path: Path) -> None:
+    signals, legacy = tmp_path / "signals", tmp_path / "snapshots"
+    touch(legacy / "signals" / "date=2026-11-09" / "scan_153658.jsonl")
+    newest = touch(signals / "date=2026-11-11" / "scheduled_152500.jsonl")
+    touch(signals / "date=2026-11-11" / "preview_160000.jsonl")
+    touch(signals / "date=2026-11-11" / "tickers_170000.jsonl")
+
+    assert COVERAGE.latest_scan(signals, legacy) == newest
+
+
+def test_latest_scan_falls_back_to_the_old_scan_files(tmp_path: Path) -> None:
+    signals, legacy = tmp_path / "signals", tmp_path / "snapshots"
+    old = touch(legacy / "signals" / "date=2026-11-09" / "scan_153658.jsonl")
+    touch(legacy / "signals" / "date=2026-11-09" / "tickers_154817.jsonl")
+
+    assert COVERAGE.latest_scan(signals, legacy) == old
+
+
+def test_reads_the_new_scan_files_and_skips_the_scan_line(tmp_path: Path) -> None:
+    scan_line = {"type": "scan", "kind": "scheduled"}
+    signal_line = {"type": "signal", **row("AAPL")}
+    path = touch(
+        tmp_path / "scheduled_152500.jsonl",
+        "\n".join(json.dumps(line) for line in (scan_line, signal_line)),
+    )
+
+    assert [r["symbol"] for r in COVERAGE.load_rows(path)] == ["AAPL"]

@@ -83,6 +83,7 @@ class AlpacaServer:
     snapshot_pages: list[dict[str, Any]] = field(default_factory=list)
     contract_pages: list[list[dict[str, Any]]] = field(default_factory=list)
     bar_pages: list[list[dict[str, Any]]] = field(default_factory=list)
+    unfiltered_contracts: list[dict[str, Any]] = field(default_factory=list)
     status: int = 200
     requests: list[httpx.Request] = field(default_factory=list)
 
@@ -98,6 +99,9 @@ class AlpacaServer:
         if path == "/v1beta1/options/snapshots/AAPL":
             page, token = self._page(self.snapshot_pages, request)
             return httpx.Response(200, json={"snapshots": page, "next_page_token": token})
+        if path == "/v2/options/contracts" and request.url.params.get("limit") == "1":
+            body = {"option_contracts": self.unfiltered_contracts[:1], "next_page_token": None}
+            return httpx.Response(200, json=body)
         if path == "/v2/options/contracts":
             page, token = self._page(self.contract_pages, request)
             return httpx.Response(200, json={"option_contracts": page, "next_page_token": token})

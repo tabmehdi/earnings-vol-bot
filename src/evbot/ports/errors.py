@@ -16,3 +16,7 @@ class TradingCalendarError(PortError):
 
 class SnapshotError(PortError):
     pass
+
+
+class RepositoryError(PortError):
+    pass

@@ -15,6 +15,7 @@ STANDARD_CONTRACT_SIZE = 100
 SNAPSHOT_PAGE_LIMIT = 1_000
 CONTRACT_PAGE_LIMIT = 10_000
 BAR_PAGE_LIMIT = 10_000
+AVAILABILITY_HORIZON_DAYS = 3 * 365
 
 
 class AlpacaMarketData:
@@ -107,8 +108,26 @@ class AlpacaMarketData:
             latest = quoted_at if latest is None else max(latest, quoted_at)
 
         if latest is None:
+            if not set(snapshots) & set(contracts):
+                raise MarketDataError(f"{symbol}: {self._why_no_contracts(symbol, scan_day)}")
             raise MarketDataError(f"{symbol}: no fresh option quotes ({stale} stale dropped)")
         return ChainSnapshot(OptionChain(symbol, spot, latest, tuple(quotes)), stale, self._feeds)
+
+    def _why_no_contracts(self, symbol: str, scan_day: date) -> str:
+        """One extra request, only for empty chains, to tell 'none near spot' from 'none at all'."""
+        params: dict[str, str | int | float] = {
+            "underlying_symbols": symbol,
+            "status": "active",
+            "expiration_date_gte": scan_day.isoformat(),
+            # The endpoint defaults this to the next weekend, which would hide later expiries.
+            "expiration_date_lte": (
+                scan_day + timedelta(days=AVAILABILITY_HORIZON_DAYS)
+            ).isoformat(),
+            "limit": 1,
+        }
+        url = f"{self._trading_url}/v2/options/contracts"
+        listed = self._http.get(url, params, self._headers).get("option_contracts") or []
+        return "no contracts within strike range" if listed else "no option contracts available"
 
     def _spot(self, symbol: str) -> float:
         params = {"feed": self._feeds.spot}

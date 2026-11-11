@@ -12,6 +12,7 @@ back_expiry_offset_days = 30   # back = expiry closest to front + 30 days
 [schedule]
 entry_minutes_before_close = 15
 exit_minutes_after_open = 15
+scan_start = "15:25"            # New York time; the daily scan must finish before the entry time
 
 [pricing]
 risk_free_rate = 0.045
@@ -41,3 +42,6 @@ nasdaq_requests_per_minute = 30
 
 [storage]
 snapshot_dir = "data/snapshots"
+signals_dir = "data/signals"
+logs_dir = "data/logs"
+locks_dir = "data/locks"

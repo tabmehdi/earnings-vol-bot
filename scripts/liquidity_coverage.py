@@ -1,6 +1,6 @@
 """Shows what candidate liquidity rules would keep and remove, using saved preview scans.
 
-Usage: uv run python scripts/liquidity_coverage.py [--scan PATH] [--snapshot-dir DIR]
+Usage: uv run python scripts/liquidity_coverage.py [--scan PATH] [--signals-dir DIR]
 """
 
 import argparse
@@ -39,16 +39,25 @@ class RuleResult:
     kept_high_iv_rv: list[str]
 
 
-def latest_scan(snapshot_dir: Path) -> Path:
-    """The newest full scan; --tickers runs are saved under a different prefix."""
-    scans = sorted((snapshot_dir / "signals").glob("date=*/scan_*.jsonl"))
+def latest_scan(signals_dir: Path, legacy_snapshot_dir: Path) -> Path:
+    """The newest scheduled scan, including the scan files written before Phase 4.
+
+    Preview and --tickers runs are saved under other prefixes and are not considered.
+    """
+    scans = [
+        *signals_dir.glob("date=*/scheduled_*.jsonl"),
+        *(legacy_snapshot_dir / "signals").glob("date=*/scan_*.jsonl"),
+    ]
     if not scans:
-        raise SystemExit(f"no saved scans under {snapshot_dir}; run the preview command first")
-    return scans[-1]
+        raise SystemExit(f"no saved scans under {signals_dir}; run the scan command first")
+    return max(scans, key=lambda path: (path.parent.name, path.stem.rsplit("_", 1)[-1]))
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    """Signal rows from either file format; Phase 4 files start with a scan line."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines if line]
+    return [row for row in rows if row.get("type", "signal") == "signal"]
 
 
 def load_rows(path: Path) -> list[dict[str, Any]]:
@@ -110,10 +119,16 @@ def format_table(results: list[RuleResult], total: int) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan", type=Path, help="a scan file; defaults to the latest full scan")
-    parser.add_argument("--snapshot-dir", type=Path, default=Path("data/snapshots"))
+    parser.add_argument("--signals-dir", type=Path, default=Path("data/signals"))
+    parser.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        default=Path("data/snapshots"),
+        help="where scans saved before Phase 4 live (under signals/)",
+    )
     args = parser.parse_args()
 
-    path = args.scan or latest_scan(args.snapshot_dir)
+    path = args.scan or latest_scan(args.signals_dir, args.snapshot_dir)
     rows = load_rows(path)
     print(f"Scan: {path}")
     print(format_legs(read_rows(path)))

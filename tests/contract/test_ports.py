@@ -8,17 +8,20 @@ import httpx
 import pytest
 
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
+from evbot.adapters.jsonl_trade_repository import JsonlTradeRepository
 from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.adapters.parquet_snapshot_store import ParquetSnapshotStore
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.prices import Bar, PriceHistory
+from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.snapshots import ChainSnapshot
 from evbot.ports.clock import Clock
 from evbot.ports.earnings_calendar import EarningsCalendar
 from evbot.ports.errors import MarketDataError, SnapshotError, TradingCalendarError
 from evbot.ports.market_data import MarketDataProvider
 from evbot.ports.snapshot_store import SnapshotStore
+from evbot.ports.trade_repository import TradeRepository
 from evbot.ports.trading_calendar import TradingCalendar
 from tests.fakes.ports import (
     FakeEarningsCalendar,
@@ -26,6 +29,7 @@ from tests.fakes.ports import (
     FakeTradingCalendar,
     FixedClock,
     InMemorySnapshotStore,
+    InMemoryTradeRepository,
 )
 from tests.fixtures.alpaca_server import (
     CALL,
@@ -199,3 +203,37 @@ def test_store_returns_the_history_it_saved(snapshot_store: SnapshotStore) -> No
 def test_store_raises_for_an_unknown_chain(snapshot_store: SnapshotStore) -> None:
     with pytest.raises(SnapshotError):
         snapshot_store.load_chain("AAPL", SCAN_TIME)
+
+
+# TradeRepository
+
+
+@pytest.fixture(params=["fake", "adapter"])
+def trade_repository(request: pytest.FixtureRequest, tmp_path: Path) -> TradeRepository:
+    if request.param == "fake":
+        return InMemoryTradeRepository()
+    return JsonlTradeRepository(tmp_path)
+
+
+def scan_at(started: datetime, kind: ScanKind = ScanKind.SCHEDULED) -> ScanRecord:
+    return ScanRecord(kind, started, started + timedelta(minutes=4), ())
+
+
+def test_repository_returns_the_days_scans_in_order(trade_repository: TradeRepository) -> None:
+    afternoon = scan_at(SCAN_TIME)
+    morning = scan_at(SCAN_TIME - timedelta(hours=5), ScanKind.PREVIEW)
+
+    trade_repository.save_scan(afternoon)
+    trade_repository.save_scan(morning)
+
+    assert trade_repository.scans_on(SCAN_TIME.date()) == (morning, afternoon)
+
+
+def test_repository_day_is_the_new_york_day(trade_repository: TradeRepository) -> None:
+    # 23:30 New York on Nov 19 is already Nov 20 in UTC.
+    evening = datetime(2026, 11, 19, 23, 30, tzinfo=NEW_YORK)
+
+    trade_repository.save_scan(scan_at(evening))
+
+    assert len(trade_repository.scans_on(date(2026, 11, 19))) == 1
+    assert trade_repository.scans_on(date(2026, 11, 20)) == ()

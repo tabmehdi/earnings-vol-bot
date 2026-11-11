@@ -252,6 +252,37 @@ def test_nanosecond_timestamps_are_understood() -> None:
     assert server.adapter().get_chain("AAPL").chain.as_of.microsecond == 123456
 
 
+def test_no_contract_in_range_but_some_listed_says_so() -> None:
+    # Like CAN at $0.19: contracts exist, but none within +/-25% of spot.
+    server = AlpacaServer(
+        snapshot_pages=[{}],
+        contract_pages=[[]],
+        unfiltered_contracts=[contract_row(CALL, strike="0.5")],
+    )
+
+    with pytest.raises(MarketDataError, match="no contracts within strike range"):
+        server.adapter().get_chain("AAPL")
+
+
+def test_no_contracts_at_all_says_none_are_available() -> None:
+    # Like BAK: Alpaca lists no option contracts for the symbol.
+    server = AlpacaServer(snapshot_pages=[{}], contract_pages=[[]], unfiltered_contracts=[])
+
+    with pytest.raises(MarketDataError, match="no option contracts available"):
+        server.adapter().get_chain("AAPL")
+
+
+def test_the_availability_check_asks_for_any_active_contract() -> None:
+    server = AlpacaServer(snapshot_pages=[{}], contract_pages=[[]])
+
+    with pytest.raises(MarketDataError):
+        server.adapter().get_chain("AAPL")
+
+    probe = server.requests_to(CONTRACTS_PATH)[-1].url.params
+    assert probe["limit"] == "1"
+    assert "strike_price_gte" not in probe
+
+
 def test_all_quotes_stale_is_an_error_that_says_how_many() -> None:
     server = server_with(snapshots={CALL: option_snapshot(age_seconds=9000)})
 

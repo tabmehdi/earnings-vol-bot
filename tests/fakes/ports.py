@@ -1,10 +1,14 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from evbot.domain.events import EarningsEvent
 from evbot.domain.prices import PriceHistory
+from evbot.domain.scans import ScanRecord
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
 from evbot.ports.errors import MarketDataError, SnapshotError, TradingCalendarError
+
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,3 +93,15 @@ class InMemorySnapshotStore:
         if (symbol, as_of) not in self.histories:
             raise SnapshotError(f"no history for {symbol} at {as_of}")
         return self.histories[(symbol, as_of)]
+
+
+@dataclass(slots=True)
+class InMemoryTradeRepository:
+    scans: list[ScanRecord] = field(default_factory=list)
+
+    def save_scan(self, scan: ScanRecord) -> None:
+        self.scans.append(scan)
+
+    def scans_on(self, day: date) -> tuple[ScanRecord, ...]:
+        found = (s for s in self.scans if s.started_at.astimezone(NEW_YORK).date() == day)
+        return tuple(sorted(found, key=lambda scan: scan.started_at))

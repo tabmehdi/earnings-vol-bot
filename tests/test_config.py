@@ -60,3 +60,7 @@ def test_default_config_loads_market_data_and_storage(monkeypatch: pytest.Monkey
     assert config.market_data.alpaca_requests_per_minute == 180
     assert config.market_data.nasdaq_requests_per_minute == 30
     assert config.storage.snapshot_dir == "data/snapshots"
+    assert config.storage.signals_dir == "data/signals"
+    assert config.storage.logs_dir == "data/logs"
+    assert config.storage.locks_dir == "data/locks"
+    assert config.schedule.scan_start == "15:25"

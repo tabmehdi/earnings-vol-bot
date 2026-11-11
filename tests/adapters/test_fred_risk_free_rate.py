@@ -2,8 +2,8 @@ from datetime import date
 from typing import Any
 
 import pytest
-from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
 
+from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
 from evbot.ports.errors import RiskFreeRateError
 from tests.fixtures.http import SeenRequest, json_client, response
 

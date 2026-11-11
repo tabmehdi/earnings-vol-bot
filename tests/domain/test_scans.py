@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+
 from evbot.domain.scans import ScanKind, ScanRecord
 
 STARTED = datetime(2026, 11, 9, 20, 25, tzinfo=UTC)

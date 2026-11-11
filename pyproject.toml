@@ -32,6 +32,10 @@ extend-exclude = ["docs/legacy"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+# Explicit, so import sorting never depends on whether a module exists yet (or on the cache).
+known-first-party = ["evbot", "tests"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

@@ -20,3 +20,7 @@ class SnapshotError(PortError):
 
 class RepositoryError(PortError):
     pass
+
+
+class RiskFreeRateError(PortError):
+    pass

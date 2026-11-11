@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
+from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
 from evbot.adapters.http_client import JsonGetter, RequestsJsonHttpClient
 from evbot.adapters.jsonl_trade_repository import JsonlTradeRepository
 from evbot.adapters.market_clock import MarketClock
@@ -99,6 +100,7 @@ def build_scanner(
     nasdaq_http: JsonGetter,
     key_id: str,
     secret_key: str,
+    rates: FredRiskFreeRate | None = None,
 ) -> Scanner:
     market = config.market_data
     calendar = AlpacaTradingCalendar(alpaca_http, market.trading_base_url, key_id, secret_key)
@@ -127,7 +129,19 @@ def build_scanner(
             config.schedule.exit_minutes_after_open,
         ),
         history_bars=max(config.metrics.rv_window + 1, config.metrics.volume_window),
+        fallback_rate=config.pricing.risk_free_rate,
+        rates=rates,
     )
+
+
+def build_rates(
+    config: MarketDataConfig, session: requests.Session, api_key: str | None
+) -> FredRiskFreeRate | None:
+    """None without a key: the scan then uses [pricing].risk_free_rate and says so."""
+    if not api_key:
+        return None
+    http = build_http(config, session, config.fred_requests_per_minute)
+    return FredRiskFreeRate(http, config.fred_url, config.fred_series, api_key)
 
 
 def parse_tickers(text: str) -> tuple[str, ...]:
@@ -187,7 +201,14 @@ def format_summary(scan: ScanRecord, alpaca_requests: int, nasdaq_requests: int)
         f"of which {failures} data failures); "
         f"{alpaca_requests + nasdaq_requests} requests (alpaca {alpaca_requests}, "
         f"nasdaq {nasdaq_requests}); finished before entry: {on_time}"
+        f"{_rate_text(scan)}"
     )
+
+
+def _rate_text(scan: ScanRecord) -> str:
+    if scan.risk_free_rate is None:
+        return ""
+    return f"; rate {scan.risk_free_rate:.2%} ({scan.rate_source})"
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -211,20 +232,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     load_dotenv()
     key_id = os.environ.get("ALPACA_API_KEY")
     secret_key = os.environ.get("ALPACA_SECRET_KEY")
+    fred_key = os.environ.get("FRED_API_KEY")
     if not key_id or not secret_key:
         parser.error("set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment or .env")
 
     config = load_config()
     if args.command == "scan":
-        _run_scheduled(config, key_id, secret_key)
+        _run_scheduled(config, key_id, secret_key, fred_key)
     else:
-        _run_preview(config, key_id, secret_key, tickers, args.limit)
+        _run_preview(config, key_id, secret_key, fred_key, tickers, args.limit)
 
 
 def _run_preview(
     config: StrategyConfig,
     key_id: str,
     secret_key: str,
+    fred_key: str | None,
     tickers: tuple[str, ...] | None,
     limit: int | None,
 ) -> None:
@@ -232,10 +255,15 @@ def _run_preview(
         print(TICKERS_WARNING, flush=True)
     market = config.market_data
     clock = MarketClock()
-    with requests.Session() as alpaca_session, requests.Session() as nasdaq_session:
+    with (
+        requests.Session() as alpaca_session,
+        requests.Session() as nasdaq_session,
+        requests.Session() as fred_session,
+    ):
         alpaca_http = build_http(market, alpaca_session, market.alpaca_requests_per_minute)
         nasdaq_http = build_http(market, nasdaq_session, market.nasdaq_requests_per_minute)
-        scanner = build_scanner(config, clock, alpaca_http, nasdaq_http, key_id, secret_key)
+        rates = build_rates(market, fred_session, fred_key)
+        scanner = build_scanner(config, clock, alpaca_http, nasdaq_http, key_id, secret_key, rates)
         universe = scanner.universe_for(tickers) if tickers else scanner.find_reports()
         print(format_universe(universe), flush=True)
         kind = ScanKind.TICKERS if tickers else ScanKind.PREVIEW
@@ -244,7 +272,9 @@ def _run_preview(
     print(format_summary(scan, alpaca_http.request_count, nasdaq_http.request_count))
 
 
-def _run_scheduled(config: StrategyConfig, key_id: str, secret_key: str) -> None:
+def _run_scheduled(
+    config: StrategyConfig, key_id: str, secret_key: str, fred_key: str | None
+) -> None:
     clock = MarketClock()
     today = clock.now().date()
     handlers = _log_to(Path(config.storage.logs_dir) / f"scan_{today:%Y-%m-%d}.log")
@@ -253,7 +283,7 @@ def _run_scheduled(config: StrategyConfig, key_id: str, secret_key: str) -> None
         if not lock.acquire():
             logger.info("another scan is running (lock %s); exiting", lock.path)
             return
-        _scheduled_scan(config, clock, today, key_id, secret_key)
+        _scheduled_scan(config, clock, today, (key_id, secret_key, fred_key))
     except Exception:
         logger.exception("scan failed")
         raise SystemExit(1) from None
@@ -265,14 +295,23 @@ def _run_scheduled(config: StrategyConfig, key_id: str, secret_key: str) -> None
 
 
 def _scheduled_scan(
-    config: StrategyConfig, clock: MarketClock, today: date, key_id: str, secret_key: str
+    config: StrategyConfig,
+    clock: MarketClock,
+    today: date,
+    keys: tuple[str, str, str | None],
 ) -> None:
+    key_id, secret_key, fred_key = keys
     logger.info("scan started for %s", today)
     market = config.market_data
-    with requests.Session() as alpaca_session, requests.Session() as nasdaq_session:
+    with (
+        requests.Session() as alpaca_session,
+        requests.Session() as nasdaq_session,
+        requests.Session() as fred_session,
+    ):
         alpaca_http = build_http(market, alpaca_session, market.alpaca_requests_per_minute)
         nasdaq_http = build_http(market, nasdaq_session, market.nasdaq_requests_per_minute)
-        scanner = build_scanner(config, clock, alpaca_http, nasdaq_http, key_id, secret_key)
+        rates = build_rates(market, fred_session, fred_key)
+        scanner = build_scanner(config, clock, alpaca_http, nasdaq_http, key_id, secret_key, rates)
         reason = scanner.skip_reason()
         if reason is not None:
             logger.info("skipped: %s", reason)

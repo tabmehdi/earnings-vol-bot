@@ -59,6 +59,9 @@ def test_default_config_loads_market_data_and_storage(monkeypatch: pytest.Monkey
     assert config.market_data.max_quote_age_seconds == 300
     assert config.market_data.alpaca_requests_per_minute == 180
     assert config.market_data.nasdaq_requests_per_minute == 30
+    assert config.market_data.fred_url == "https://api.stlouisfed.org/fred/series/observations"
+    assert config.market_data.fred_series == "DGS3MO"
+    assert config.market_data.fred_requests_per_minute == 30
     assert config.storage.snapshot_dir == "data/snapshots"
     assert config.storage.signals_dir == "data/signals"
     assert config.storage.logs_dir == "data/logs"

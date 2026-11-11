@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
+from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
 from evbot.adapters.http_client import RequestsJsonHttpClient
 from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
@@ -59,6 +60,32 @@ def market_data(http: RequestsJsonHttpClient, keys: tuple[str, str]) -> AlpacaMa
         strike_range_pct=CONFIG.strike_range_pct,
         max_quote_age_seconds=CONFIG.max_quote_age_seconds,
     )
+
+
+@pytest.fixture
+def fred() -> FredRiskFreeRate:
+    load_dotenv()
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key:
+        pytest.skip("FRED key is not set")
+    return FredRiskFreeRate(client_on_new_session(), CONFIG.fred_url, CONFIG.fred_series, api_key)
+
+
+def test_fred_gives_a_plausible_decimal_rate_for_today(fred: FredRiskFreeRate) -> None:
+    rate = fred.rate_on(MarketClock().now().date())
+
+    # A decimal, not percent: 3-month Treasury yields have stayed between 0% and 20%.
+    assert 0.0 <= rate < 0.20
+
+
+def test_fred_answers_on_a_weekend_with_the_last_trading_days_value(
+    fred: FredRiskFreeRate,
+) -> None:
+    today = MarketClock().now().date()
+    last_saturday = today - timedelta(days=(today.weekday() - 5) % 7 or 7)
+    previous_friday = last_saturday - timedelta(days=1)
+
+    assert fred.rate_on(last_saturday) == fred.rate_on(previous_friday)
 
 
 def test_nasdaq_returns_a_list_for_the_coming_week() -> None:

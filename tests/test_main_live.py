@@ -36,7 +36,13 @@ def signal(
 
 def record(*signals: Signal, kind: ScanKind = ScanKind.SCHEDULED) -> ScanRecord:
     return ScanRecord(
-        kind, STARTED, STARTED + timedelta(minutes=4), signals, STARTED + timedelta(minutes=20)
+        kind,
+        STARTED,
+        STARTED + timedelta(minutes=4),
+        signals,
+        STARTED + timedelta(minutes=20),
+        risk_free_rate=0.0384,
+        rate_source="FRED DGS3MO",
     )
 
 
@@ -117,6 +123,7 @@ def test_summary_counts_verdicts_requests_and_timing() -> None:
         "702 requests",
         "240.0s",
         "before entry: yes",
+        "rate 3.84% (FRED DGS3MO)",
     ):
         assert expected in text
 

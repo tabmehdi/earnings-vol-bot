@@ -1,18 +1,21 @@
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from evbot.app.scanner import MARKET_DATA, QUOTE_FRESHNESS, Scanner, ScanUniverse
+import pytest
 
+from evbot.app.scanner import MARKET_DATA, QUOTE_FRESHNESS, Scanner, ScanUniverse
 from evbot.app.trade_scheduler import TradeScheduler
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import Verdict
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
 from tests.fakes.ports import (
+    FailingRiskFreeRate,
     FakeEarningsCalendar,
     FakeMarketData,
     FakeTradingCalendar,
     FixedClock,
+    FixedRiskFreeRate,
     InMemorySnapshotStore,
     InMemoryTradeRepository,
 )
@@ -47,12 +50,14 @@ SESSIONS = dict(
 AAPL = EarningsEvent("AAPL", FRONT, ReportTiming.BMO)
 NOPE = EarningsEvent("NOPE", FRONT, ReportTiming.BMO)
 FRIDAY_AFTERNOON = datetime(2026, 11, 20, 15, 45, tzinfo=NEW_YORK)
+FALLBACK_RATE = 0.045
 
 
 def scanner_for(
     events: tuple[EarningsEvent, ...],
     now: datetime = AS_OF,
     repository: InMemoryTradeRepository | None = None,
+    rates: FixedRiskFreeRate | FailingRiskFreeRate | None = None,
 ) -> tuple[Scanner, InMemorySnapshotStore, InMemoryTradeRepository]:
     store = InMemorySnapshotStore()
     repository = repository if repository is not None else InMemoryTradeRepository()
@@ -69,6 +74,8 @@ def scanner_for(
             calendar, entry_minutes_before_close=15, exit_minutes_after_open=15
         ),
         history_bars=31,
+        rates=rates,
+        fallback_rate=FALLBACK_RATE,
     )
     return scanner, store, repository
 
@@ -253,3 +260,46 @@ def test_no_skip_on_a_normal_session() -> None:
 
     assert scanner.skip_reason() is None
     assert HOLIDAY not in SESSIONS
+
+
+# Risk-free rate
+
+
+def scan_with_rates(
+    rates: FixedRiskFreeRate | FailingRiskFreeRate | None,
+) -> ScanRecord:
+    scanner, _, _ = scanner_for((AAPL,), rates=rates)
+    return scanner.run(scanner.find_reports(), ScanKind.SCHEDULED)
+
+
+def test_the_providers_rate_is_used_and_recorded() -> None:
+    record = scan_with_rates(FixedRiskFreeRate(0.0384, "FRED DGS3MO"))
+
+    assert record.risk_free_rate == 0.0384
+    assert record.rate_source == "FRED DGS3MO"
+
+
+def test_the_rate_reaches_the_iv_calculation() -> None:
+    low = scan_with_rates(FixedRiskFreeRate(0.0)).signals[0].metrics
+    high = scan_with_rates(FixedRiskFreeRate(0.20)).signals[0].metrics
+
+    assert low is not None and high is not None
+    assert low.iv30_rv30 != high.iv30_rv30
+
+
+def test_a_failing_provider_falls_back_to_config_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record = scan_with_rates(FailingRiskFreeRate())
+
+    assert record.risk_free_rate == FALLBACK_RATE
+    assert record.rate_source == "config"
+    assert record.signals[0].verdict is Verdict.RECOMMENDED
+    assert "rate source is down" in caplog.text
+
+
+def test_no_provider_falls_back_to_config_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    record = scan_with_rates(None)
+
+    assert (record.risk_free_rate, record.rate_source) == (FALLBACK_RATE, "config")
+    assert "no risk-free rate source" in caplog.text

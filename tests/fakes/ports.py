@@ -6,7 +6,12 @@ from evbot.domain.events import EarningsEvent
 from evbot.domain.prices import PriceHistory
 from evbot.domain.scans import ScanRecord
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
-from evbot.ports.errors import MarketDataError, SnapshotError, TradingCalendarError
+from evbot.ports.errors import (
+    MarketDataError,
+    RiskFreeRateError,
+    SnapshotError,
+    TradingCalendarError,
+)
 
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -105,3 +110,20 @@ class InMemoryTradeRepository:
     def scans_on(self, day: date) -> tuple[ScanRecord, ...]:
         found = (s for s in self.scans if s.started_at.astimezone(NEW_YORK).date() == day)
         return tuple(sorted(found, key=lambda scan: scan.started_at))
+
+
+@dataclass(frozen=True, slots=True)
+class FixedRiskFreeRate:
+    rate: float
+    name: str = "fixed"
+
+    def rate_on(self, day: date) -> float:
+        return self.rate
+
+
+@dataclass(frozen=True, slots=True)
+class FailingRiskFreeRate:
+    name: str = "failing"
+
+    def rate_on(self, day: date) -> float:
+        raise RiskFreeRateError("rate source is down")

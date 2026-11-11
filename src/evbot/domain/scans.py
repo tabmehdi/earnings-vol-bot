@@ -18,6 +18,8 @@ class ScanRecord:
     finished_at: datetime
     signals: tuple[Signal, ...]
     entry_deadline: datetime | None = None
+    risk_free_rate: float | None = None
+    rate_source: str | None = None
 
     def __post_init__(self) -> None:
         times = (self.started_at, self.finished_at, self.entry_deadline)

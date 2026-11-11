@@ -15,7 +15,7 @@ exit_minutes_after_open = 15
 scan_start = "15:25"            # New York time; the daily scan must finish before the entry time
 
 [pricing]
-risk_free_rate = 0.045
+risk_free_rate = 0.045          # fallback when FRED is unavailable or FRED_API_KEY is unset
 
 [metrics]
 iv_days = 30
@@ -39,6 +39,9 @@ backoff_seconds = 1.0
 timeout_seconds = 20.0
 alpaca_requests_per_minute = 180   # the free plan allows 200
 nasdaq_requests_per_minute = 30
+fred_url = "https://api.stlouisfed.org/fred/series/observations"
+fred_series = "DGS3MO"           # 3-month Treasury constant maturity, in percent
+fred_requests_per_minute = 30    # FRED allows 120; a scan makes one request
 
 [storage]
 snapshot_dir = "data/snapshots"

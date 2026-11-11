@@ -3,9 +3,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from evbot.adapters.jsonl_trade_repository import JsonlTradeRepository
-from evbot.domain.scans import ScanKind, ScanRecord
-
 from evbot.domain.events import EarningsEvent, ReportTiming
+from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import FilterResult, Signal, SignalMetrics, Verdict
 from evbot.strategy.evaluator import MarketContext
 from tests.fixtures.market import AS_OF, BACKWARDATED, EVENT, build_chain
@@ -97,3 +96,31 @@ def test_signal_lines_carry_flat_fields_for_tools(tmp_path: Path) -> None:
     assert signal_line["symbol"] == "AAPL"
     assert signal_line["verdict"] == "recommended"
     assert signal_line["front_open_interest"] == 1000
+
+
+def test_rate_and_its_source_round_trip(tmp_path: Path) -> None:
+    scan = ScanRecord(
+        ScanKind.SCHEDULED, STARTED, STARTED, (), risk_free_rate=0.0384, rate_source="FRED DGS3MO"
+    )
+    repository = JsonlTradeRepository(tmp_path)
+
+    repository.save_scan(scan)
+
+    assert repository.scans_on(NY_DAY) == (scan,)
+
+
+def test_files_written_before_the_rate_was_recorded_still_read(tmp_path: Path) -> None:
+    folder = tmp_path / "date=2026-11-09"
+    folder.mkdir()
+    header = {
+        "type": "scan",
+        "kind": "scheduled",
+        "started_at": STARTED.isoformat(),
+        "finished_at": STARTED.isoformat(),
+        "entry_deadline": None,
+    }
+    (folder / "scheduled_152500.jsonl").write_text(json.dumps(header) + "\n", encoding="utf-8")
+
+    scan = JsonlTradeRepository(tmp_path).scans_on(NY_DAY)[0]
+
+    assert (scan.risk_free_rate, scan.rate_source) == (None, None)

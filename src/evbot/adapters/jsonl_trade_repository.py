@@ -53,6 +53,8 @@ class JsonlTradeRepository:
             datetime.fromisoformat(header["finished_at"]),
             tuple(self._signal(line) for line in signal_lines),
             datetime.fromisoformat(deadline) if deadline else None,
+            risk_free_rate=header.get("risk_free_rate"),
+            rate_source=header.get("rate_source"),
         )
 
     @staticmethod
@@ -63,6 +65,8 @@ class JsonlTradeRepository:
             "started_at": scan.started_at.isoformat(),
             "finished_at": scan.finished_at.isoformat(),
             "entry_deadline": scan.entry_deadline.isoformat() if scan.entry_deadline else None,
+            "risk_free_rate": scan.risk_free_rate,
+            "rate_source": scan.rate_source,
         }
 
     @classmethod

@@ -11,10 +11,12 @@ from evbot.ports.clock import Clock
 from evbot.ports.earnings_calendar import EarningsCalendar
 from evbot.ports.errors import PortError, TradingCalendarError
 from evbot.ports.market_data import MarketDataProvider
+from evbot.ports.risk_free_rate import RiskFreeRateProvider
 from evbot.ports.snapshot_store import SnapshotStore
 from evbot.ports.trade_repository import TradeRepository
 from evbot.ports.trading_calendar import TradingCalendar
 from evbot.strategy.evaluator import MarketContext, SignalEvaluator
+from evbot.strategy.rates import ConstantRate
 
 MARKET_DATA = "market_data"
 QUOTE_FRESHNESS = "quote_freshness"
@@ -53,6 +55,8 @@ class Scanner:
     evaluator: SignalEvaluator
     scheduler: TradeScheduler
     history_bars: int
+    fallback_rate: float
+    rates: RiskFreeRateProvider | None = None
 
     def skip_reason(self) -> str | None:
         """Why the scheduled scan should not run now, or None if it should."""
@@ -84,14 +88,42 @@ class Scanner:
 
     def run(self, universe: ScanUniverse, kind: ScanKind, limit: int | None = None) -> ScanRecord:
         started = self.clock.now()
+        rate, source = self._risk_free_rate(universe.today)
+        evaluator = replace(
+            self.evaluator, metrics=replace(self.evaluator.metrics, rates=ConstantRate(rate))
+        )
         last_completed = self.trading_calendar.previous_session(universe.today)
         events = universe.selected[:limit]
-        signals = tuple(self._signal(event, last_completed) for event in events)
-        record = ScanRecord(kind, started, self.clock.now(), signals, self._entry_deadline(events))
+        signals = tuple(self._signal(event, last_completed, evaluator) for event in events)
+        record = ScanRecord(
+            kind,
+            started,
+            self.clock.now(),
+            signals,
+            self._entry_deadline(events),
+            risk_free_rate=rate,
+            rate_source=source,
+        )
         self.repository.save_scan(record)
         return record
 
-    def _signal(self, event: EarningsEvent, last_completed: date) -> Signal:
+    def _risk_free_rate(self, day: date) -> tuple[float, str]:
+        """One rate for the whole scan; never fails, so a rate outage cannot stop a scan."""
+        if self.rates is None:
+            logger.warning(
+                "no risk-free rate source configured; using the config rate %.4f",
+                self.fallback_rate,
+            )
+            return self.fallback_rate, "config"
+        try:
+            return self.rates.rate_on(day), self.rates.name
+        except PortError as error:
+            logger.warning("%s; using the config rate %.4f", error, self.fallback_rate)
+            return self.fallback_rate, "config"
+
+    def _signal(
+        self, event: EarningsEvent, last_completed: date, evaluator: SignalEvaluator
+    ) -> Signal:
         symbol = event.symbol
         try:
             snapshot = self.market_data.get_chain(symbol)
@@ -102,7 +134,7 @@ class Scanner:
             logger.warning("%s: %s", symbol, error)
             reason = FilterResult(MARKET_DATA, False, None, None, detail=str(error))
             return Signal(event, self.clock.now(), None, (reason,), Verdict.AVOID, spread=None)
-        signal = self.evaluator.evaluate(MarketContext(event, snapshot.chain, history))
+        signal = evaluator.evaluate(MarketContext(event, snapshot.chain, history))
         freshness = FilterResult(
             QUOTE_FRESHNESS,
             True,

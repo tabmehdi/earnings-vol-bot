@@ -59,6 +59,9 @@ class MarketDataConfig:
     timeout_seconds: float
     alpaca_requests_per_minute: int
     nasdaq_requests_per_minute: int
+    fred_url: str
+    fred_series: str
+    fred_requests_per_minute: int
 
 
 @dataclass(frozen=True, slots=True)

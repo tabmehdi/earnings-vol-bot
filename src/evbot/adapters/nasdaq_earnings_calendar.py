@@ -1,6 +1,6 @@
 from datetime import date
 
-from evbot.adapters.http_client import HttpRequestError, RetryingJsonClient
+from evbot.adapters.http_client import HttpRequestError, JsonGetter
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.ports.errors import EarningsCalendarError
 
@@ -21,7 +21,7 @@ TIMING_BY_LABEL = {
 
 
 class NasdaqEarningsCalendar:
-    def __init__(self, http: RetryingJsonClient, url: str) -> None:
+    def __init__(self, http: JsonGetter, url: str) -> None:
         self._http = http
         self._url = url
 

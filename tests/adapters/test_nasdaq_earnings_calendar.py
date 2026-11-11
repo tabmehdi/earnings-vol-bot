@@ -1,23 +1,23 @@
 from datetime import date
 from typing import Any
 
-import httpx
 import pytest
+from requests import Response
 
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.domain.events import ReportTiming
 from evbot.ports.errors import EarningsCalendarError
-from tests.fixtures.http import json_client
+from tests.fixtures.http import SeenRequest, json_client, response
 
 URL = "https://nasdaq.test/earnings"
 DAY = date(2026, 11, 10)
 
 
 def calendar_returning(payload: Any, status: int = 200) -> NasdaqEarningsCalendar:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: SeenRequest) -> Response:
         assert request.url.params["date"] == "2026-11-10"
         assert "Mozilla" in request.headers["User-Agent"]
-        return httpx.Response(status, json=payload)
+        return response(status, payload)
 
     return NasdaqEarningsCalendar(json_client(handler, max_retries=0), URL)
 

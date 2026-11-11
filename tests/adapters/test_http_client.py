@@ -1,88 +1,123 @@
-import httpx
+from typing import Any
+
 import pytest
+import requests
 
-from evbot.adapters.http_client import HttpRequestError, JsonHttpClient
+from evbot.adapters.http_client import HttpRequestError, RequestsJsonHttpClient
+from tests.fixtures.http import FakeTransport, SeenRequest, response, session_on
 
-URL = "https://example.test/thing"
+URL = "https://example.test/data"
 
 
 def client_returning(
-    responses: list[httpx.Response], delays: list[float] | None = None
-) -> tuple[JsonHttpClient, list[httpx.Request]]:
-    seen: list[httpx.Request] = []
+    responses: list[requests.Response],
+    delays: list[float] | None = None,
+    max_retries: int = 2,
+    limiter: Any = None,
+) -> tuple[RequestsJsonHttpClient, FakeTransport]:
     remaining = iter(responses)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return next(remaining)
-
-    client = JsonHttpClient(
-        httpx.Client(transport=httpx.MockTransport(handler)),
-        max_retries=2,
+    transport = FakeTransport(lambda _: next(remaining))
+    client = RequestsJsonHttpClient(
+        session_on(transport),
+        timeout=12.5,
+        max_retries=max_retries,
         backoff_seconds=1.0,
         sleep=(delays if delays is not None else []).append,
+        limiter=limiter,
     )
-    return client, seen
+    return client, transport
 
 
 def test_returns_decoded_json_and_sends_params_and_headers() -> None:
-    client, seen = client_returning([httpx.Response(200, json={"a": 1})])
+    client, transport = client_returning([response(200, {"a": 1})])
 
     assert client.get(URL, params={"x": "1"}, headers={"H": "v"}) == {"a": 1}
-    assert seen[0].url.params["x"] == "1"
-    assert seen[0].headers["H"] == "v"
+    assert transport.seen[0].url.params["x"] == "1"
+    assert transport.seen[0].headers["H"] == "v"
+
+
+def test_every_attempt_sends_the_timeout() -> None:
+    client, transport = client_returning([response(500), response(200, [])])
+
+    client.get(URL)
+
+    assert transport.timeouts == [12.5, 12.5]
+
+
+def test_per_request_headers_never_become_session_defaults() -> None:
+    transport = FakeTransport(lambda _: response(200, []))
+    session = session_on(transport)
+    client = RequestsJsonHttpClient(session, timeout=1.0, max_retries=0, backoff_seconds=1.0)
+
+    client.get(URL, headers={"APCA-API-KEY-ID": "key"})
+    client.get(URL)
+
+    assert "APCA-API-KEY-ID" not in session.headers
+    assert "APCA-API-KEY-ID" not in transport.seen[1].headers
 
 
 def test_retries_server_errors_with_exponential_backoff() -> None:
     delays: list[float] = []
-    client, seen = client_returning(
-        [httpx.Response(500), httpx.Response(503), httpx.Response(200, json=[])], delays
-    )
+    client, transport = client_returning([response(500), response(503), response(200, [])], delays)
 
     assert client.get(URL) == []
-    assert len(seen) == 3
+    assert len(transport.seen) == 3
     assert delays == [1.0, 2.0]
 
 
 def test_rate_limit_waits_for_retry_after() -> None:
     delays: list[float] = []
-    limited = httpx.Response(429, headers={"Retry-After": "7"})
-    client, _ = client_returning([limited, httpx.Response(200, json=[])], delays)
+    limited = response(429, headers={"Retry-After": "7"})
+    client, _ = client_returning([limited, response(200, [])], delays)
 
     client.get(URL)
 
     assert delays == [7.0]
 
 
-def test_gives_up_after_max_retries() -> None:
-    client, seen = client_returning([httpx.Response(500)] * 3)
+def test_unreadable_retry_after_falls_back_to_backoff() -> None:
+    delays: list[float] = []
+    limited = response(429, headers={"Retry-After": "soon"})
+    client, _ = client_returning([limited, response(200, [])], delays)
 
-    with pytest.raises(HttpRequestError):
+    client.get(URL)
+
+    assert delays == [1.0]
+
+
+def test_gives_up_after_max_retries() -> None:
+    client, transport = client_returning([response(500)] * 3)
+
+    with pytest.raises(HttpRequestError, match=f"HTTP 500 from {URL}"):
         client.get(URL)
-    assert len(seen) == 3
+    assert len(transport.seen) == 3
 
 
 def test_client_errors_are_not_retried() -> None:
-    client, seen = client_returning([httpx.Response(403)])
+    delays: list[float] = []
+    client, transport = client_returning([response(403)], delays)
 
-    with pytest.raises(HttpRequestError):
+    with pytest.raises(HttpRequestError, match=f"HTTP 403 from {URL}"):
         client.get(URL)
-    assert len(seen) == 1
+    assert len(transport.seen) == 1
+    assert delays == []
 
 
-def test_network_failures_are_retried_then_reported() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("down", request=request)
+@pytest.mark.parametrize("error", [requests.ConnectionError, requests.Timeout])
+def test_network_failures_are_retried_then_reported(error: type[Exception]) -> None:
+    def handler(_: SeenRequest) -> requests.Response:
+        raise error("down")
 
-    client = JsonHttpClient(
-        httpx.Client(transport=httpx.MockTransport(handler)),
-        max_retries=1,
-        backoff_seconds=1.0,
-        sleep=lambda _: None,
+    transport = FakeTransport(handler)
+    delays: list[float] = []
+    client = RequestsJsonHttpClient(
+        session_on(transport), timeout=1.0, max_retries=1, backoff_seconds=1.0, sleep=delays.append
     )
 
-    with pytest.raises(HttpRequestError):
+    with pytest.raises(HttpRequestError, match=f"{error.__name__} calling {URL}"):
         client.get(URL)
+    assert len(transport.seen) == 2
+    assert delays == [1.0]
 
 
 class CountingLimiter:
@@ -94,15 +129,8 @@ class CountingLimiter:
 
 
 def test_every_attempt_takes_a_token_and_is_counted() -> None:
-    responses = iter([httpx.Response(429), httpx.Response(200, json=[])])
     limiter = CountingLimiter()
-    client = JsonHttpClient(
-        httpx.Client(transport=httpx.MockTransport(lambda _: next(responses))),
-        max_retries=2,
-        backoff_seconds=1.0,
-        sleep=lambda _: None,
-        limiter=limiter,
-    )
+    client, _ = client_returning([response(429), response(200, [])], limiter=limiter)
 
     client.get(URL)
 
@@ -111,7 +139,7 @@ def test_every_attempt_takes_a_token_and_is_counted() -> None:
 
 
 def test_invalid_json_is_reported() -> None:
-    client, _ = client_returning([httpx.Response(200, text="<html>")])
+    client, _ = client_returning([response(200, content=b"<html>")])
 
-    with pytest.raises(HttpRequestError):
+    with pytest.raises(HttpRequestError, match=f"invalid JSON from {URL}"):
         client.get(URL)

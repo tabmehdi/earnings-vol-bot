@@ -3,14 +3,13 @@
 import os
 from datetime import timedelta
 
-import httpx
 import pytest
 import requests
 from dotenv import load_dotenv
 
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
-from evbot.adapters.http_client import JsonHttpClient, RequestsJsonHttpClient
+from evbot.adapters.http_client import RequestsJsonHttpClient
 from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.config import load_config
@@ -22,9 +21,15 @@ CONFIG = load_config().market_data
 
 
 @pytest.fixture
-def http() -> JsonHttpClient:
-    client = httpx.Client(timeout=CONFIG.timeout_seconds)
-    return JsonHttpClient(client, CONFIG.max_retries, CONFIG.backoff_seconds)
+def http() -> RequestsJsonHttpClient:
+    """Alpaca's client; Nasdaq gets its own session below, as in main_live."""
+    return client_on_new_session()
+
+
+def client_on_new_session() -> RequestsJsonHttpClient:
+    return RequestsJsonHttpClient(
+        requests.Session(), CONFIG.timeout_seconds, CONFIG.max_retries, CONFIG.backoff_seconds
+    )
 
 
 @pytest.fixture
@@ -37,12 +42,12 @@ def keys() -> tuple[str, str]:
 
 
 @pytest.fixture
-def calendar(http: JsonHttpClient, keys: tuple[str, str]) -> AlpacaTradingCalendar:
+def calendar(http: RequestsJsonHttpClient, keys: tuple[str, str]) -> AlpacaTradingCalendar:
     return AlpacaTradingCalendar(http, CONFIG.trading_base_url, *keys)
 
 
 @pytest.fixture
-def market_data(http: JsonHttpClient, keys: tuple[str, str]) -> AlpacaMarketData:
+def market_data(http: RequestsJsonHttpClient, keys: tuple[str, str]) -> AlpacaMarketData:
     return AlpacaMarketData(
         http,
         MarketClock(),
@@ -57,10 +62,7 @@ def market_data(http: JsonHttpClient, keys: tuple[str, str]) -> AlpacaMarketData
 
 
 def test_nasdaq_returns_a_list_for_the_coming_week() -> None:
-    http = RequestsJsonHttpClient(
-        requests.Session(), CONFIG.timeout_seconds, CONFIG.max_retries, CONFIG.backoff_seconds
-    )
-    calendar = NasdaqEarningsCalendar(http, CONFIG.earnings_url)
+    calendar = NasdaqEarningsCalendar(client_on_new_session(), CONFIG.earnings_url)
     today = MarketClock().now().date()
 
     found = [calendar.events_on(today + timedelta(days=offset)) for offset in range(7)]

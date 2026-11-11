@@ -3,12 +3,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
+from requests import Response
 
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.domain.snapshots import DataFeeds
 from tests.fakes.ports import FixedClock
-from tests.fixtures.http import json_client
+from tests.fixtures.http import SeenRequest, json_client, response
 
 SCAN_TIME = datetime(2026, 11, 19, 15, 45, tzinfo=ZoneInfo("America/New_York"))
 FRONT_ISO = "2026-11-20"
@@ -85,40 +85,40 @@ class AlpacaServer:
     bar_pages: list[list[dict[str, Any]]] = field(default_factory=list)
     unfiltered_contracts: list[dict[str, Any]] = field(default_factory=list)
     status: int = 200
-    requests: list[httpx.Request] = field(default_factory=list)
+    requests: list[SeenRequest] = field(default_factory=list)
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    def handle(self, request: SeenRequest) -> Response:
         self.requests.append(request)
         if self.status != 200:
-            return httpx.Response(self.status)
+            return response(self.status)
         path = request.url.path
         if path == "/v2/stocks/AAPL/quotes/latest":
-            return httpx.Response(200, json={"symbol": "AAPL", "quote": self.stock_quote})
+            return response(200, {"symbol": "AAPL", "quote": self.stock_quote})
         if path == "/v2/stocks/AAPL/trades/latest":
-            return httpx.Response(200, json={"symbol": "AAPL", "trade": self.stock_trade})
+            return response(200, {"symbol": "AAPL", "trade": self.stock_trade})
         if path == "/v1beta1/options/snapshots/AAPL":
             page, token = self._page(self.snapshot_pages, request)
-            return httpx.Response(200, json={"snapshots": page, "next_page_token": token})
+            return response(200, {"snapshots": page, "next_page_token": token})
         if path == "/v2/options/contracts" and request.url.params.get("limit") == "1":
             body = {"option_contracts": self.unfiltered_contracts[:1], "next_page_token": None}
-            return httpx.Response(200, json=body)
+            return response(200, body)
         if path == "/v2/options/contracts":
             page, token = self._page(self.contract_pages, request)
-            return httpx.Response(200, json={"option_contracts": page, "next_page_token": token})
+            return response(200, {"option_contracts": page, "next_page_token": token})
         if path == "/v2/stocks/bars":
             page, token = self._page(self.bar_pages, request)
-            return httpx.Response(200, json={"bars": {"AAPL": page}, "next_page_token": token})
-        return httpx.Response(404)
+            return response(200, {"bars": {"AAPL": page}, "next_page_token": token})
+        return response(404)
 
     @staticmethod
-    def _page(pages: list[Any], request: httpx.Request) -> tuple[Any, str | None]:
+    def _page(pages: list[Any], request: SeenRequest) -> tuple[Any, str | None]:
         if not pages:
             return None, None
         index = int(request.url.params.get("page_token", 0))
         token = str(index + 1) if index + 1 < len(pages) else None
         return pages[index], token
 
-    def requests_to(self, path: str) -> list[httpx.Request]:
+    def requests_to(self, path: str) -> list[SeenRequest]:
         return [request for request in self.requests if request.url.path == path]
 
     def adapter(self) -> AlpacaMarketData:

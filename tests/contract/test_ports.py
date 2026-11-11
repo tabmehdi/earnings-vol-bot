@@ -4,8 +4,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
+from requests import Response
 
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
 from evbot.adapters.jsonl_trade_repository import JsonlTradeRepository
@@ -40,7 +40,7 @@ from tests.fixtures.alpaca_server import (
     contract_row,
     option_snapshot,
 )
-from tests.fixtures.http import json_client
+from tests.fixtures.http import SeenRequest, json_client, response
 
 NEW_YORK = ZoneInfo("America/New_York")
 REPORT_DAY = date(2026, 11, 10)
@@ -59,11 +59,11 @@ def test_clock_is_timezone_aware(clock: Clock) -> None:
 
 
 def nasdaq() -> NasdaqEarningsCalendar:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: SeenRequest) -> Response:
         if request.url.params["date"] == REPORT_DAY.isoformat():
             row = {"symbol": "AAPL", "time": "time-pre-market"}
-            return httpx.Response(200, json={"data": {"rows": [row]}})
-        return httpx.Response(200, json={"data": {"rows": None}})
+            return response(200, {"data": {"rows": [row]}})
+        return response(200, {"data": {"rows": None}})
 
     return NasdaqEarningsCalendar(json_client(handler, max_retries=0), "https://nasdaq.test/x")
 
@@ -138,7 +138,7 @@ HOLIDAY = date(2026, 11, 26)
 
 def alpaca_calendar() -> AlpacaTradingCalendar:
     rows = [{"date": d.isoformat(), "open": "09:30", "close": "16:00"} for d in OPEN_DAYS]
-    client = json_client(lambda _: httpx.Response(200, json=rows), max_retries=0)
+    client = json_client(lambda _: response(200, rows), max_retries=0)
     return AlpacaTradingCalendar(client, "https://alpaca.test", "key", "secret")
 
 

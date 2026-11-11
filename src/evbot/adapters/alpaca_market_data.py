@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from evbot.adapters.http_client import HttpRequestError, JsonHttpClient
+from evbot.adapters.http_client import HttpRequestError, JsonGetter
 from evbot.domain.options import OptionChain, OptionContract, OptionQuote, OptionRight
 from evbot.domain.prices import Bar, PriceHistory
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
@@ -21,7 +21,7 @@ AVAILABILITY_HORIZON_DAYS = 3 * 365
 class AlpacaMarketData:
     def __init__(
         self,
-        http: JsonHttpClient,
+        http: JsonGetter,
         clock: Clock,
         data_base_url: str,
         trading_base_url: str,

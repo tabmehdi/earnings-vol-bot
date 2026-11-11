@@ -1,7 +1,7 @@
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from evbot.adapters.http_client import HttpRequestError, JsonHttpClient
+from evbot.adapters.http_client import HttpRequestError, JsonGetter
 from evbot.ports.errors import TradingCalendarError
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -9,7 +9,7 @@ FETCH_RADIUS_DAYS = 14  # longer than any US market closure, so a nearby session
 
 
 class AlpacaTradingCalendar:
-    def __init__(self, http: JsonHttpClient, base_url: str, key_id: str, secret_key: str) -> None:
+    def __init__(self, http: JsonGetter, base_url: str, key_id: str, secret_key: str) -> None:
         self._http = http
         self._url = f"{base_url}/v2/calendar"
         self._headers = {"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret_key}

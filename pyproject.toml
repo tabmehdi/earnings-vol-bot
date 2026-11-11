@@ -5,7 +5,6 @@ description = "Event-driven options bot that sells earnings IV crush with long c
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "httpx>=0.28.1",
     "pyarrow>=26.0.1",
     "python-dotenv>=1.2.4",
     "requests>=2.34.2",

@@ -2,12 +2,12 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
+from requests import Response
 
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
 from evbot.ports.errors import TradingCalendarError
-from tests.fixtures.http import json_client
+from tests.fixtures.http import SeenRequest, json_client, response
 
 NEW_YORK = ZoneInfo("America/New_York")
 THANKSGIVING_WEEK = [
@@ -20,12 +20,12 @@ THANKSGIVING_WEEK = [
 
 def calendar_returning(
     payload: Any, status: int = 200
-) -> tuple[AlpacaTradingCalendar, list[httpx.Request]]:
-    seen: list[httpx.Request] = []
+) -> tuple[AlpacaTradingCalendar, list[SeenRequest]]:
+    seen: list[SeenRequest] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: SeenRequest) -> Response:
         seen.append(request)
-        return httpx.Response(status, json=payload)
+        return response(status, payload)
 
     calendar = AlpacaTradingCalendar(
         json_client(handler, max_retries=0), "https://alpaca.test", "key", "secret"

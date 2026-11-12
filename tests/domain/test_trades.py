@@ -1,8 +1,10 @@
+from dataclasses import replace
 from datetime import date, datetime
 
 import pytest
 
 from evbot.domain.options import OptionContract, OptionRight
+from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.domain.trades import Fill, Position
 
@@ -75,3 +77,45 @@ def test_exit_cannot_precede_entry() -> None:
 def test_fill_rejects_non_positive_quantity() -> None:
     with pytest.raises(ValueError):
         Fill(2.00, 0, OPENED)
+
+
+# Market prices at fill time, position identity and exit state
+
+FRONT_AT_FILL = LegPrices(1.00, 1.10, 1.05, None, OPENED)
+BACK_AT_FILL = LegPrices(3.00, 3.20, 3.10, None, OPENED)
+
+
+def test_a_fill_keeps_both_legs_market_at_fill_time() -> None:
+    fill = Fill(2.05, 3, OPENED, front=FRONT_AT_FILL, back=BACK_AT_FILL)
+
+    assert fill.front == FRONT_AT_FILL
+    assert fill.back == BACK_AT_FILL
+    assert fill.back.mid - fill.front.mid == pytest.approx(2.05)
+
+
+def test_split_keeps_the_entry_price_on_both_parts() -> None:
+    position = replace(open_position(quantity=3), position_id="p-1")
+
+    closing, staying = position.split(1)
+
+    assert (closing.entry.quantity, staying.entry.quantity) == (1, 2)
+    assert closing.entry.net_price == staying.entry.net_price == 2.00
+    assert closing.position_id == "p-1:1"
+    assert staying.position_id == "p-1"
+
+
+@pytest.mark.parametrize("quantity", [0, 3, 4])
+def test_split_needs_a_part_smaller_than_the_position(quantity: int) -> None:
+    with pytest.raises(ValueError):
+        open_position(quantity=3).split(quantity)
+
+
+def test_an_exit_failure_is_marked_and_still_open() -> None:
+    failed = open_position().mark_exit_failed()
+
+    assert failed.exit_failed
+    assert failed.is_open
+
+
+def test_symbol_is_the_spreads_underlying() -> None:
+    assert open_position().symbol == "AAPL"

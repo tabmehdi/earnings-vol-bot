@@ -5,9 +5,11 @@ from zoneinfo import ZoneInfo
 
 from evbot.domain.events import EarningsEvent
 from evbot.domain.options import OptionContract, OptionQuote
+from evbot.domain.orders import OrderTicket
 from evbot.domain.prices import PriceHistory
 from evbot.domain.scans import ScanRecord
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
+from evbot.domain.trades import Position
 from evbot.ports.errors import (
     MarketDataError,
     RiskFreeRateError,
@@ -146,6 +148,20 @@ class InMemorySnapshotStore:
 @dataclass(slots=True)
 class InMemoryTradeRepository:
     scans: list[ScanRecord] = field(default_factory=list)
+    orders: list[OrderTicket] = field(default_factory=list)
+    positions: dict[str, Position] = field(default_factory=dict)
+
+    def save_order(self, ticket: OrderTicket) -> None:
+        self.orders.append(ticket)
+
+    def orders_on(self, day: date) -> tuple[OrderTicket, ...]:
+        return tuple(o for o in self.orders if o.submitted_at.astimezone(NEW_YORK).date() == day)
+
+    def save_position(self, position: Position) -> None:
+        self.positions[position.position_id] = position
+
+    def open_positions(self) -> tuple[Position, ...]:
+        return tuple(p for _, p in sorted(self.positions.items()) if p.is_open)
 
     def save_scan(self, scan: ScanRecord) -> None:
         self.scans.append(scan)

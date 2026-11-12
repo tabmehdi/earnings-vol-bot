@@ -13,9 +13,12 @@ from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.adapters.parquet_snapshot_store import ParquetSnapshotStore
 from evbot.domain.events import EarningsEvent, ReportTiming
+from evbot.domain.options import OptionContract, OptionRight
 from evbot.domain.prices import Bar, PriceHistory
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.snapshots import ChainSnapshot
+from evbot.domain.spreads import CalendarSpread, Leg, Side
+from evbot.domain.trades import Fill, Position
 from evbot.ports.clock import Clock
 from evbot.ports.earnings_calendar import EarningsCalendar
 from evbot.ports.errors import MarketDataError, SnapshotError, TradingCalendarError
@@ -241,3 +244,19 @@ def test_repository_day_is_the_new_york_day(trade_repository: TradeRepository) -
 
 def test_sessions_between_lists_open_days_in_order(trading_calendar: TradingCalendar) -> None:
     assert trading_calendar.sessions_between(OPEN_DAYS[0], OPEN_DAYS[1]) == OPEN_DAYS
+
+
+def test_repository_keeps_the_latest_state_of_each_position(
+    trade_repository: TradeRepository,
+) -> None:
+    contract_front = OptionContract("AAPL", date(2026, 11, 20), 100.0, OptionRight.CALL)
+    contract_back = OptionContract("AAPL", date(2026, 12, 18), 100.0, OptionRight.CALL)
+    spread = CalendarSpread(Leg(contract_front, Side.SELL), Leg(contract_back, Side.BUY))
+    opened = Position(spread, Fill(2.0, 1, SCAN_TIME), position_id="AAPL-open")
+    other = Position(spread, Fill(2.0, 1, SCAN_TIME), position_id="MSFT-open")
+
+    trade_repository.save_position(opened)
+    trade_repository.save_position(other)
+    trade_repository.save_position(opened.close(Fill(2.5, 1, SCAN_TIME + timedelta(hours=18))))
+
+    assert trade_repository.open_positions() == (other,)

@@ -22,6 +22,12 @@ class AlpacaTradingCalendar:
     def next_session(self, day: date) -> date:
         return self._nearest_session(day, step=1)
 
+    def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        if not all(day in self._covered for day in days):
+            self._load(start, end)
+        return tuple(day for day in days if day in self._sessions)
+
     def open_time(self, day: date) -> datetime:
         return self._session(day)[0]
 
@@ -45,8 +51,9 @@ class AlpacaTradingCalendar:
     def _load_around(self, day: date) -> None:
         if day in self._covered:
             return
-        start = day - timedelta(days=FETCH_RADIUS_DAYS)
-        end = day + timedelta(days=FETCH_RADIUS_DAYS)
+        self._load(day - timedelta(days=FETCH_RADIUS_DAYS), day + timedelta(days=FETCH_RADIUS_DAYS))
+
+    def _load(self, start: date, end: date) -> None:
         params = {"start": start.isoformat(), "end": end.isoformat()}
         try:
             rows = self._http.get(self._url, params=params, headers=self._headers)

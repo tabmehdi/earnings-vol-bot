@@ -11,6 +11,10 @@ class TradingCalendar(Protocol):
         """Earliest session strictly after day."""
         ...
 
+    def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        """Every session from start to end, inclusive, in order; one lookup for a range."""
+        ...
+
     def open_time(self, day: date) -> datetime:
         """Timezone-aware open of a session; raises TradingCalendarError on a non-session."""
         ...

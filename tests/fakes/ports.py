@@ -76,6 +76,9 @@ class FakeTradingCalendar:
             raise TradingCalendarError(f"no session after {day}")
         return min(later)
 
+    def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        return tuple(sorted(day for day in self.sessions if start <= day <= end))
+
     def open_time(self, day: date) -> datetime:
         return self._session(day)[0]
 

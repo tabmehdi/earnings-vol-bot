@@ -96,7 +96,7 @@ class Scanner:
         )
         last_completed = self.trading_calendar.previous_session(universe.today)
         horizon = universe.today + timedelta(days=self.monthly_horizon_days)
-        monthlies = monthly_expiries(universe.today, horizon, self._is_session)
+        monthlies = self._monthlies(universe.today, horizon)
         events = universe.selected[:limit]
         skips = self._screen(events)
         signals = tuple(
@@ -131,12 +131,11 @@ class Scanner:
             logger.warning("%s; using the config rate %.4f", error, self.fallback_rate)
             return self.fallback_rate, "config"
 
-    def _is_session(self, day: date) -> bool:
-        try:
-            self.trading_calendar.close_time(day)
-        except TradingCalendarError:
-            return False
-        return True
+    def _monthlies(self, today: date, horizon: date) -> tuple[date, ...]:
+        """One calendar lookup covering every third Friday up to the horizon's month."""
+        next_month = (horizon.replace(day=28) + timedelta(days=4)).replace(day=1)
+        sessions = set(self.trading_calendar.sessions_between(today, next_month))
+        return monthly_expiries(today, horizon, sessions.__contains__)
 
     def _screen(self, events: Sequence[EarningsEvent]) -> Mapping[str, str]:
         """Tickers with no contracts are skipped up front; on failure, scan them all."""

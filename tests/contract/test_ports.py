@@ -237,3 +237,7 @@ def test_repository_day_is_the_new_york_day(trade_repository: TradeRepository) -
 
     assert len(trade_repository.scans_on(date(2026, 11, 19))) == 1
     assert trade_repository.scans_on(date(2026, 11, 20)) == ()
+
+
+def test_sessions_between_lists_open_days_in_order(trading_calendar: TradingCalendar) -> None:
+    assert trading_calendar.sessions_between(OPEN_DAYS[0], OPEN_DAYS[1]) == OPEN_DAYS

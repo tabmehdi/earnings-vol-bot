@@ -107,3 +107,28 @@ def test_malformed_row_raises() -> None:
 
     with pytest.raises(TradingCalendarError):
         calendar.close_time(date(2026, 11, 24))
+
+
+def test_sessions_between_is_one_request_for_the_whole_range() -> None:
+    calendar, seen = calendar_returning(THANKSGIVING_WEEK)
+
+    sessions = calendar.sessions_between(date(2026, 11, 24), date(2026, 11, 30))
+
+    assert sessions == (
+        date(2026, 11, 24),
+        date(2026, 11, 25),
+        date(2026, 11, 27),
+        date(2026, 11, 30),
+    )
+    assert len(seen) == 1
+    assert (seen[0].url.params["start"], seen[0].url.params["end"]) == ("2026-11-24", "2026-11-30")
+
+
+def test_days_inside_a_loaded_range_need_no_more_requests() -> None:
+    calendar, seen = calendar_returning(THANKSGIVING_WEEK)
+    calendar.sessions_between(date(2026, 11, 24), date(2026, 11, 30))
+
+    calendar.close_time(date(2026, 11, 27))
+    calendar.open_time(date(2026, 11, 25))
+
+    assert len(seen) == 1

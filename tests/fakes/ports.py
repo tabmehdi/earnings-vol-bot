@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -36,8 +37,17 @@ class FakeEarningsCalendar:
 class FakeMarketData:
     chains: dict[str, ChainSnapshot]
     histories: dict[str, PriceHistory]
+    skips: dict[str, str] = field(default_factory=dict)
+    screen_fails: bool = False
+    asked: list[str] = field(default_factory=list)
+
+    def screen(self, symbols: Sequence[str]) -> dict[str, str]:
+        if self.screen_fails:
+            raise MarketDataError("contract screening is down")
+        return {s: reason for s, reason in self.skips.items() if s in symbols}
 
     def get_chain(self, symbol: str) -> ChainSnapshot:
+        self.asked.append(symbol)
         if symbol not in self.chains:
             raise MarketDataError(f"no chain for {symbol}")
         return self.chains[symbol]

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -331,3 +332,41 @@ def test_a_holiday_friday_moves_the_monthly_to_thursday() -> None:
 
     failed = {r.name: r.detail for r in record.signals[0].failed()}
     assert "2026-12-17" in failed["spread_available"]
+
+
+# Screening before the scan
+
+
+def scanner_with(market: FakeMarketData) -> Scanner:
+    scanner, _, _ = scanner_for((AAPL, NOPE))
+    return replace(scanner, market_data=market)
+
+
+def test_a_screened_out_ticker_is_avoid_without_fetching_its_chain() -> None:
+    market = FakeMarketData(
+        {"AAPL": SNAPSHOT}, {"AAPL": HISTORY}, skips={"NOPE": "no option contracts available"}
+    )
+    scanner = scanner_with(market)
+
+    record = scanner.run(scanner.find_reports(), ScanKind.SCHEDULED)
+
+    nope = record.signals[1]
+    assert nope.verdict is Verdict.AVOID
+    assert [(r.name, r.detail) for r in nope.failed()] == [
+        (MARKET_DATA, "NOPE: no option contracts available")
+    ]
+    assert market.asked == ["AAPL"]
+    assert record.signals[0].verdict is Verdict.RECOMMENDED
+
+
+def test_a_screening_failure_falls_back_to_scanning_every_ticker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    market = FakeMarketData({"AAPL": SNAPSHOT}, {"AAPL": HISTORY}, screen_fails=True)
+    scanner = scanner_with(market)
+
+    record = scanner.run(scanner.find_reports(), ScanKind.SCHEDULED)
+
+    assert market.asked == ["AAPL", "NOPE"]
+    assert record.signals[0].verdict is Verdict.RECOMMENDED
+    assert "contract screening is down" in caplog.text

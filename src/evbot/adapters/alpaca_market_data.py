@@ -1,4 +1,5 @@
-from collections.abc import Iterator
+from collections import defaultdict
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,6 +17,9 @@ SNAPSHOT_PAGE_LIMIT = 1_000
 CONTRACT_PAGE_LIMIT = 10_000
 BAR_PAGE_LIMIT = 10_000
 AVAILABILITY_HORIZON_DAYS = 3 * 365
+SCREEN_BATCH_SIZE = 100  # underlyings per contracts request, to keep URLs short
+NONE_NEAR_SPOT = "no contracts within strike range"
+NONE_LISTED = "no option contracts available"
 
 
 class AlpacaMarketData:
@@ -41,6 +45,17 @@ class AlpacaMarketData:
         self._chain_max_days = chain_max_days
         self._strike_range_pct = strike_range_pct
         self._max_quote_age = timedelta(seconds=max_quote_age_seconds)
+        # Contracts in the expiry window per screened ticker, any strike, for get_chain.
+        self._listed: dict[str, list[Any]] = {}
+        self._listed_day: date | None = None
+
+    def screen(self, symbols: Sequence[str]) -> Mapping[str, str]:
+        try:
+            return self._screen(symbols)
+        except HttpRequestError as error:
+            raise MarketDataError(f"contract screening: {error}") from error
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise MarketDataError(f"contract screening: unexpected format: {error!r}") from error
 
     def get_chain(self, symbol: str) -> ChainSnapshot:
         try:
@@ -80,14 +95,26 @@ class AlpacaMarketData:
         scan_time = self._clock.now()
         spot, spot_at = self._spot(symbol)
         scan_day = scan_time.astimezone(NEW_YORK).date()
+        low = round(spot * (1 - self._strike_range_pct), 2)
+        high = round(spot * (1 + self._strike_range_pct), 2)
         filters: dict[str, str | int | float] = {
-            "strike_price_gte": round(spot * (1 - self._strike_range_pct), 2),
-            "strike_price_lte": round(spot * (1 + self._strike_range_pct), 2),
+            "strike_price_gte": low,
+            "strike_price_lte": high,
             "expiration_date_gte": scan_day.isoformat(),
             "expiration_date_lte": (scan_day + timedelta(days=self._chain_max_days)).isoformat(),
         }
+        screened = self._listed.get(symbol) if self._listed_day == scan_day else None
+        if screened is None:
+            contracts = self._standard_contracts(symbol, filters)
+            no_overlap_reason = None
+        else:
+            # The same filter the contracts endpoint would apply, on what screening found.
+            near = [r for r in screened if low <= float(r["strike_price"]) <= high]
+            if not near:
+                raise MarketDataError(f"{symbol}: {NONE_NEAR_SPOT}")
+            contracts = {r["symbol"]: r for r in near if _is_standard(r, symbol)}
+            no_overlap_reason = NONE_NEAR_SPOT  # contracts exist, so the probe would say so
         snapshots = self._option_snapshots(symbol, filters)
-        contracts = self._standard_contracts(symbol, filters)
 
         quotes: list[OptionQuote] = []
         latest: datetime | None = None
@@ -109,7 +136,8 @@ class AlpacaMarketData:
 
         if latest is None:
             if not set(snapshots) & set(contracts):
-                raise MarketDataError(f"{symbol}: {self._why_no_contracts(symbol, scan_day)}")
+                reason = no_overlap_reason or self._why_no_contracts(symbol, scan_day)
+                raise MarketDataError(f"{symbol}: {reason}")
             raise MarketDataError(f"{symbol}: no fresh option quotes ({stale} stale dropped)")
         chain = OptionChain(symbol, spot, latest, tuple(quotes), spot_at=spot_at)
         return ChainSnapshot(chain, stale, self._feeds)
@@ -128,7 +156,38 @@ class AlpacaMarketData:
         }
         url = f"{self._trading_url}/v2/options/contracts"
         listed = self._http.get(url, params, self._headers).get("option_contracts") or []
-        return "no contracts within strike range" if listed else "no option contracts available"
+        return NONE_NEAR_SPOT if listed else NONE_LISTED
+
+    def _screen(self, symbols: Sequence[str]) -> dict[str, str]:
+        scan_day = self._clock.now().astimezone(NEW_YORK).date()
+        in_window = self._contracts_by_underlying(symbols, scan_day, self._chain_max_days)
+        missing = [s for s in symbols if not in_window.get(s)]
+        later = (
+            self._contracts_by_underlying(missing, scan_day, AVAILABILITY_HORIZON_DAYS)
+            if missing
+            else {}
+        )
+        self._listed = {s: in_window.get(s, []) for s in symbols}
+        self._listed_day = scan_day
+        return {s: NONE_NEAR_SPOT if later.get(s) else NONE_LISTED for s in missing}
+
+    def _contracts_by_underlying(
+        self, symbols: Sequence[str], scan_day: date, horizon_days: int
+    ) -> dict[str, list[Any]]:
+        found: defaultdict[str, list[Any]] = defaultdict(list)
+        url = f"{self._trading_url}/v2/options/contracts"
+        for start in range(0, len(symbols), SCREEN_BATCH_SIZE):
+            params: dict[str, str | int | float] = {
+                "underlying_symbols": ",".join(symbols[start : start + SCREEN_BATCH_SIZE]),
+                "status": "active",
+                "expiration_date_gte": scan_day.isoformat(),
+                "expiration_date_lte": (scan_day + timedelta(days=horizon_days)).isoformat(),
+                "limit": CONTRACT_PAGE_LIMIT,
+            }
+            for page in self._pages(url, params):
+                for row in page["option_contracts"] or []:
+                    found[row["underlying_symbol"]].append(row)
+        return found
 
     def _spot(self, symbol: str) -> tuple[float, datetime | None]:
         params = {"feed": self._feeds.spot}
@@ -168,9 +227,7 @@ class AlpacaMarketData:
             row["symbol"]: row
             for page in self._pages(url, params)
             for row in page["option_contracts"] or []
-            if row["root_symbol"] == symbol
-            and float(row["multiplier"]) == STANDARD_CONTRACT_SIZE
-            and float(row["size"]) == STANDARD_CONTRACT_SIZE
+            if _is_standard(row, symbol)
         }
 
     def _pages(self, url: str, params: dict[str, str | int | float]) -> Iterator[Any]:
@@ -217,3 +274,12 @@ class AlpacaMarketData:
 
 def _timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def _is_standard(row: Any, symbol: str) -> bool:
+    """100-share contracts on the plain root; adjusted contracts (e.g. AAPL1) are left out."""
+    return (
+        row["root_symbol"] == symbol
+        and float(row["multiplier"]) == STANDARD_CONTRACT_SIZE
+        and float(row["size"]) == STANDARD_CONTRACT_SIZE
+    )

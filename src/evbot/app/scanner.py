@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
@@ -98,8 +98,12 @@ class Scanner:
         horizon = universe.today + timedelta(days=self.monthly_horizon_days)
         monthlies = monthly_expiries(universe.today, horizon, self._is_session)
         events = universe.selected[:limit]
+        skips = self._screen(events)
         signals = tuple(
-            self._signal(event, last_completed, evaluator, monthlies) for event in events
+            self._data_failure(event, f"{event.symbol}: {skips[event.symbol]}")
+            if event.symbol in skips
+            else self._signal(event, last_completed, evaluator, monthlies)
+            for event in events
         )
         record = ScanRecord(
             kind,
@@ -134,6 +138,19 @@ class Scanner:
             return False
         return True
 
+    def _screen(self, events: Sequence[EarningsEvent]) -> Mapping[str, str]:
+        """Tickers with no contracts are skipped up front; on failure, scan them all."""
+        try:
+            return self.market_data.screen([event.symbol for event in events])
+        except PortError as error:
+            logger.warning("%s; scanning every ticker instead", error)
+            return {}
+
+    def _data_failure(self, event: EarningsEvent, detail: str) -> Signal:
+        logger.warning("%s", detail)
+        reason = FilterResult(MARKET_DATA, False, None, None, detail=detail)
+        return Signal(event, self.clock.now(), None, (reason,), Verdict.AVOID, spread=None)
+
     def _signal(
         self,
         event: EarningsEvent,
@@ -148,9 +165,7 @@ class Scanner:
             self.store.save_chain(snapshot)
             self.store.save_history(history, snapshot.chain.as_of, snapshot.feeds)
         except PortError as error:
-            logger.warning("%s: %s", symbol, error)
-            reason = FilterResult(MARKET_DATA, False, None, None, detail=str(error))
-            return Signal(event, self.clock.now(), None, (reason,), Verdict.AVOID, spread=None)
+            return self._data_failure(event, str(error))
         signal = evaluator.evaluate(MarketContext(event, snapshot.chain, history, monthlies))
         freshness = FilterResult(
             QUOTE_FRESHNESS,

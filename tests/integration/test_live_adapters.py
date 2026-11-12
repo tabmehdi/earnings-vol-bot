@@ -7,6 +7,7 @@ import pytest
 import requests
 from dotenv import load_dotenv
 
+from evbot.adapters.alpaca_broker import AlpacaBroker
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
 from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
@@ -131,3 +132,28 @@ def test_chain_has_fresh_standard_contracts(market_data: AlpacaMarketData) -> No
         abs(q.contract.strike / chain.spot - 1) <= CONFIG.strike_range_pct + 0.01
         for q in chain.quotes
     )
+
+
+@pytest.fixture
+def broker(keys: tuple[str, str]) -> AlpacaBroker:
+    if os.environ.get("ALPACA_PAPER") != "true":
+        pytest.skip("ALPACA_PAPER is not true")
+    return AlpacaBroker(
+        client_on_new_session(), MarketClock(), CONFIG.trading_base_url, *keys, paper=True
+    )
+
+
+def test_paper_account_allows_multi_leg_options(keys: tuple[str, str]) -> None:
+    # Read-only. Calendars are multi-leg orders, which need options level 3.
+    account = client_on_new_session().get(
+        f"{CONFIG.trading_base_url}/v2/account",
+        headers={"APCA-API-KEY-ID": keys[0], "APCA-API-SECRET-KEY": keys[1]},
+    )
+
+    assert int(account["options_trading_level"]) >= 3, account.get("options_trading_level")
+
+
+def test_paper_broker_reads_equity_holdings_and_orders(broker: AlpacaBroker) -> None:
+    assert broker.account_equity() > 0
+    assert all(isinstance(qty, int) for qty in broker.held_contracts().values())
+    assert broker.find_order("evbot-integration-test-no-such-order") is None

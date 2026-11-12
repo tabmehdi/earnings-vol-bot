@@ -143,3 +143,37 @@ def test_invalid_json_is_reported() -> None:
 
     with pytest.raises(HttpRequestError, match=f"invalid JSON from {URL}"):
         client.get(URL)
+
+
+def test_send_posts_json_once_and_never_retries() -> None:
+    client, transport = client_returning([response(500), response(200, {"id": "a1"})])
+
+    with pytest.raises(HttpRequestError) as error:
+        client.send("POST", URL, {"qty": "1"})
+
+    assert len(transport.seen) == 1
+    assert transport.seen[0].method == "POST"
+    assert transport.seen[0].body == '{"qty": "1"}'
+    assert error.value.status == 500
+
+
+def test_send_returns_the_decoded_answer() -> None:
+    client, _ = client_returning([response(200, {"id": "a1"})])
+
+    assert client.send("PATCH", URL, {"limit_price": "2.00"}) == {"id": "a1"}
+
+
+def test_an_empty_answer_is_none() -> None:
+    client, _ = client_returning([response(204)])
+
+    assert client.send("DELETE", URL) is None
+
+
+def test_an_error_keeps_the_status_and_body() -> None:
+    client, _ = client_returning([response(422, {"message": "client_order_id must be unique"})])
+
+    with pytest.raises(HttpRequestError) as error:
+        client.send("POST", URL, {})
+
+    assert error.value.status == 422
+    assert "unique" in error.value.body

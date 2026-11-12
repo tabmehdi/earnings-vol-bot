@@ -12,7 +12,13 @@ Params = Mapping[str, str | int | float]
 
 
 class HttpRequestError(Exception):
-    """Adapters translate this into their port's error."""
+    """Adapters translate this into their port's error. status and body are set when
+    the server answered, so an adapter can tell a refusal from an outage."""
+
+    def __init__(self, message: str, status: int | None = None, body: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
 
 
 class JsonGetter(Protocol):
@@ -22,6 +28,18 @@ class JsonGetter(Protocol):
         self,
         url: str,
         params: Params | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any: ...
+
+
+class JsonSender(JsonGetter, Protocol):
+    """Adds requests that change something (orders). They are sent once, never retried."""
+
+    def send(
+        self,
+        method: str,
+        url: str,
+        body: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Any: ...
 
@@ -55,6 +73,8 @@ class RequestsJsonHttpClient:
         headers: Mapping[str, str] | None = None,
     ) -> Any:
         failure = "no attempt made"
+        last_status: int | None = None
+        last_body = ""
         for attempt in range(self._max_retries + 1):
             retry_after: float | None = None
             if self._limiter is not None:
@@ -70,15 +90,41 @@ class RequestsJsonHttpClient:
                 if response.status_code not in RETRYABLE_STATUSES:
                     return self._decoded(response, url)
                 failure = f"HTTP {response.status_code} from {url}"
+                last_status, last_body = response.status_code, response.text[:500]
                 retry_after = self._retry_after(response)
             if attempt < self._max_retries:
                 self._sleep(retry_after or self._backoff_seconds * 2**attempt)
-        raise HttpRequestError(failure)
+        raise HttpRequestError(failure, last_status, last_body)
+
+    def send(
+        self,
+        method: str,
+        url: str,
+        body: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        # One attempt only: a retried order could reach the broker twice.
+        if self._limiter is not None:
+            self._limiter.acquire()
+        self._request_count += 1
+        try:
+            response = self._session.request(
+                method, url, json=body, headers=headers, timeout=self._timeout
+            )
+        except (requests.ConnectionError, requests.Timeout) as error:
+            raise HttpRequestError(f"{type(error).__name__} calling {url}") from error
+        return self._decoded(response, url)
 
     @staticmethod
     def _decoded(response: requests.Response, url: str) -> Any:
         if response.status_code >= 400:
-            raise HttpRequestError(f"HTTP {response.status_code} from {url}")
+            raise HttpRequestError(
+                f"HTTP {response.status_code} from {url}",
+                response.status_code,
+                response.text[:500],
+            )
+        if response.status_code == 204 or not response.content:
+            return None
         try:
             return response.json()
         except ValueError as error:

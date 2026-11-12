@@ -23,6 +23,8 @@ class SeenRequest:
 
     url: SeenUrl
     headers: Mapping[str, str]
+    method: str = "GET"
+    body: str | None = None
 
 
 Handler = Callable[[SeenRequest], requests.Response]
@@ -34,7 +36,13 @@ def seen_request(prepared: requests.PreparedRequest) -> SeenRequest:
     parts = urlsplit(prepared.url or "")
     query = parse_qs(parts.query, keep_blank_values=True)
     params = {name: values[0] for name, values in query.items()}
-    return SeenRequest(SeenUrl(parts.path, params), CaseInsensitiveDict(prepared.headers))
+    body = prepared.body.decode() if isinstance(prepared.body, bytes) else prepared.body
+    return SeenRequest(
+        SeenUrl(parts.path, params),
+        CaseInsensitiveDict(prepared.headers),
+        prepared.method or "GET",
+        body,
+    )
 
 
 def response(

@@ -7,7 +7,14 @@ from zoneinfo import ZoneInfo
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionContract, OptionRight
 from evbot.domain.scans import ScanKind, ScanRecord
-from evbot.domain.signals import FilterResult, Signal, SignalMetrics, Verdict
+from evbot.domain.signals import (
+    FilterResult,
+    LegPrices,
+    Signal,
+    SignalMetrics,
+    SignalPrices,
+    Verdict,
+)
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.ports.errors import RepositoryError
 
@@ -87,7 +94,10 @@ class JsonlTradeRepository:
             "front_open_interest": legs.get("front_open_interest"),
             "back_spread_pct": legs.get("back_spread_pct"),
             "back_open_interest": legs.get("back_open_interest"),
+            "back_days": signal.spread.back_days if signal.spread else None,
+            "debit_mid": signal.prices.debit_mid if signal.prices else None,
             "failed": [result.name for result in signal.failed()],
+            "prices": _prices_fields(signal.prices),
             "filters": [
                 {
                     "name": r.name,
@@ -143,6 +153,7 @@ class JsonlTradeRepository:
             filters,
             Verdict(line["verdict"]),
             spread,
+            _prices(line.get("prices")),
         )
 
 
@@ -161,3 +172,56 @@ def _leg_liquidity(signal: Signal) -> dict[str, float | int]:
     detail = next((r.detail for r in signal.filters if r.name == LIQUIDITY), "")
     pairs = (item.split("=") for item in detail.split() if "=" in item)
     return {key: int(value) if key.endswith("interest") else float(value) for key, value in pairs}
+
+
+def _time_text(moment: datetime | None) -> str | None:
+    return moment.isoformat() if moment else None
+
+
+def _time(text: str | None) -> datetime | None:
+    return datetime.fromisoformat(text) if text else None
+
+
+def _leg_fields(leg: LegPrices | None) -> dict[str, Any] | None:
+    if leg is None:
+        return None
+    return {
+        "bid": leg.bid,
+        "ask": leg.ask,
+        "mid": leg.mid,
+        "iv": leg.iv,
+        "quoted_at": _time_text(leg.quoted_at),
+    }
+
+
+def _prices_fields(prices: SignalPrices | None) -> dict[str, Any] | None:
+    if prices is None:
+        return None
+    return {
+        "spot": prices.spot,
+        "spot_at": _time_text(prices.spot_at),
+        "front": _leg_fields(prices.front),
+        "back": _leg_fields(prices.back),
+        "debit_mid": prices.debit_mid,
+    }
+
+
+def _leg_prices(fields: dict[str, Any] | None) -> LegPrices | None:
+    if fields is None:
+        return None
+    return LegPrices(
+        fields["bid"], fields["ask"], fields["mid"], fields["iv"], _time(fields["quoted_at"])
+    )
+
+
+def _prices(fields: dict[str, Any] | None) -> SignalPrices | None:
+    """None for signals written before prices were recorded."""
+    if fields is None:
+        return None
+    return SignalPrices(
+        fields["spot"],
+        _time(fields["spot_at"]),
+        _leg_prices(fields["front"]),
+        _leg_prices(fields["back"]),
+        fields["debit_mid"],
+    )

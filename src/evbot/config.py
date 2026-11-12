@@ -19,7 +19,8 @@ class FilterConfig:
 
 @dataclass(frozen=True, slots=True)
 class StructureConfig:
-    back_expiry_offset_days: int
+    back_target_days: int
+    back_min_gap_days: int
 
 
 @dataclass(frozen=True, slots=True)

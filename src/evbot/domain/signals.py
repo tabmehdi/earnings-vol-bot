@@ -31,6 +31,26 @@ class FilterResult:
 
 
 @dataclass(frozen=True, slots=True)
+class LegPrices:
+    bid: float
+    ask: float
+    mid: float
+    iv: float | None
+    quoted_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalPrices:
+    """Market prices at decision time; legs are None when no spread was built."""
+
+    spot: float
+    spot_at: datetime | None
+    front: LegPrices | None
+    back: LegPrices | None
+    debit_mid: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class Signal:
     event: EarningsEvent
     as_of: datetime
@@ -38,6 +58,7 @@ class Signal:
     filters: tuple[FilterResult, ...]
     verdict: Verdict
     spread: CalendarSpread | None
+    prices: SignalPrices | None = None
 
     def __post_init__(self) -> None:
         names = [f.name for f in self.filters]

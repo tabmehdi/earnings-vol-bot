@@ -78,7 +78,7 @@ class AlpacaMarketData:
 
     def _fetch_chain(self, symbol: str) -> ChainSnapshot:
         scan_time = self._clock.now()
-        spot = self._spot(symbol)
+        spot, spot_at = self._spot(symbol)
         scan_day = scan_time.astimezone(NEW_YORK).date()
         filters: dict[str, str | int | float] = {
             "strike_price_gte": round(spot * (1 - self._strike_range_pct), 2),
@@ -104,14 +104,15 @@ class AlpacaMarketData:
             if scan_time - quoted_at > self._max_quote_age:
                 stale += 1
                 continue
-            quotes.append(self._quote(contract_row, snapshot, bid, ask))
+            quotes.append(self._quote(contract_row, snapshot, bid, ask, quoted_at))
             latest = quoted_at if latest is None else max(latest, quoted_at)
 
         if latest is None:
             if not set(snapshots) & set(contracts):
                 raise MarketDataError(f"{symbol}: {self._why_no_contracts(symbol, scan_day)}")
             raise MarketDataError(f"{symbol}: no fresh option quotes ({stale} stale dropped)")
-        return ChainSnapshot(OptionChain(symbol, spot, latest, tuple(quotes)), stale, self._feeds)
+        chain = OptionChain(symbol, spot, latest, tuple(quotes), spot_at=spot_at)
+        return ChainSnapshot(chain, stale, self._feeds)
 
     def _why_no_contracts(self, symbol: str, scan_day: date) -> str:
         """One extra request, only for empty chains, to tell 'none near spot' from 'none at all'."""
@@ -129,17 +130,17 @@ class AlpacaMarketData:
         listed = self._http.get(url, params, self._headers).get("option_contracts") or []
         return "no contracts within strike range" if listed else "no option contracts available"
 
-    def _spot(self, symbol: str) -> float:
+    def _spot(self, symbol: str) -> tuple[float, datetime | None]:
         params = {"feed": self._feeds.spot}
         stocks_url = f"{self._data_url}/v2/stocks/{symbol}"
         quote = self._http.get(f"{stocks_url}/quotes/latest", params, self._headers).get("quote")
         if quote:
             bid, ask = float(quote.get("bp") or 0), float(quote.get("ap") or 0)
             if 0 < bid <= ask:
-                return (bid + ask) / 2
+                return (bid + ask) / 2, _timestamp(quote.get("t"))
         trade = self._http.get(f"{stocks_url}/trades/latest", params, self._headers).get("trade")
         if trade and float(trade.get("p") or 0) > 0:
-            return float(trade["p"])
+            return float(trade["p"]), _timestamp(trade.get("t"))
         raise MarketDataError(f"{symbol}: no usable IEX quote or trade for spot")
 
     def _option_snapshots(
@@ -183,7 +184,7 @@ class AlpacaMarketData:
             page_params["page_token"] = token
 
     @staticmethod
-    def _quote(row: Any, snapshot: Any, bid: float, ask: float) -> OptionQuote:
+    def _quote(row: Any, snapshot: Any, bid: float, ask: float, quoted_at: datetime) -> OptionQuote:
         contract = OptionContract(
             underlying=row["underlying_symbol"],
             expiry=date.fromisoformat(row["expiration_date"]),
@@ -199,6 +200,7 @@ class AlpacaMarketData:
             float(vendor_iv) if vendor_iv is not None and vendor_iv >= 0 else None,
             open_interest=int(row.get("open_interest") or 0),
             volume=0,  # option volume comes from delayed indicative trades, which are not used
+            quoted_at=quoted_at,
         )
 
     @staticmethod
@@ -211,3 +213,7 @@ class AlpacaMarketData:
             close=float(row["c"]),
             volume=int(row["v"]),
         )
+
+
+def _timestamp(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None

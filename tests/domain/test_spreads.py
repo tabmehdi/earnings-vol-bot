@@ -62,3 +62,8 @@ def test_calendar_rejects_mixed_rights() -> None:
         CalendarSpread(
             Leg(contract(FRONT), Side.SELL), Leg(contract(BACK, right=OptionRight.PUT), Side.BUY)
         )
+
+
+def test_back_days_counts_calendar_days_between_the_legs() -> None:
+    # Nov 20 to Dec 18 is 28 days.
+    assert calendar().back_days == 28

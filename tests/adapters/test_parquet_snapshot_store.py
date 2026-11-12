@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -91,3 +92,18 @@ def test_missing_chain_raises(tmp_path: Path) -> None:
 def test_missing_history_raises(tmp_path: Path) -> None:
     with pytest.raises(SnapshotError):
         ParquetSnapshotStore(tmp_path).load_history("AAPL", AS_OF)
+
+
+def test_quote_and_spot_times_round_trip(tmp_path: Path) -> None:
+    quoted = datetime(2026, 11, 19, 20, 44, 50, 123456, tzinfo=UTC)
+    base = snapshot()
+    quotes = tuple(replace(q, quoted_at=quoted) for q in base.chain.quotes)
+    chain = replace(base.chain, quotes=quotes, spot_at=quoted)
+    timed = replace(base, chain=chain)
+    store = ParquetSnapshotStore(tmp_path)
+
+    store.save_chain(timed)
+
+    loaded = store.load_chain("AAPL", AS_OF).chain
+    assert loaded.spot_at == quoted
+    assert all(q.quoted_at == quoted for q in loaded.quotes)

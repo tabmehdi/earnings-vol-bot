@@ -39,6 +39,10 @@ class CalendarSpread:
     def strike(self) -> float:
         return self.front.contract.strike
 
+    @property
+    def back_days(self) -> int:
+        return (self.back.contract.expiry - self.front.contract.expiry).days
+
     def net_debit(self, front_quote: OptionQuote, back_quote: OptionQuote) -> float:
         if front_quote.contract != self.front.contract or back_quote.contract != self.back.contract:
             raise ValueError("quotes do not match the spread's legs")

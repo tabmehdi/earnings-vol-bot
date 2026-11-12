@@ -7,7 +7,7 @@ from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import FilterResult, Signal, SignalMetrics, Verdict
 from evbot.strategy.evaluator import MarketContext
-from tests.fixtures.market import AS_OF, BACKWARDATED, EVENT, build_chain
+from tests.fixtures.market import AS_OF, BACKWARDATED, EVENT, MONTHLIES, build_chain
 from tests.strategy.test_evaluator import CALM, LIQUID_VOLUME, build_history, evaluator
 
 # 20:25 UTC on Nov 9 is 15:25 in New York; 02:00 UTC on Nov 10 is still Nov 9 in New York.
@@ -16,7 +16,9 @@ NY_DAY = date(2026, 11, 9)
 
 
 def recommended_signal() -> Signal:
-    context = MarketContext(EVENT, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME))
+    context = MarketContext(
+        EVENT, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME), MONTHLIES
+    )
     return evaluator().evaluate(context)
 
 
@@ -96,6 +98,9 @@ def test_signal_lines_carry_flat_fields_for_tools(tmp_path: Path) -> None:
     assert signal_line["symbol"] == "AAPL"
     assert signal_line["verdict"] == "recommended"
     assert signal_line["front_open_interest"] == 1000
+    assert signal_line["back_days"] == 28
+    assert signal_line["prices"]["debit_mid"] > 0
+    assert signal_line["prices"]["front"]["quoted_at"].endswith("-05:00")
 
 
 def test_rate_and_its_source_round_trip(tmp_path: Path) -> None:

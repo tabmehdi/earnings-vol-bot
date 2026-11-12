@@ -16,13 +16,13 @@ from evbot.strategy.filters import (
     TermSlopeFilter,
 )
 from evbot.strategy.selection import SpreadSelector
-from tests.fixtures.market import BACK, BACKWARDATED, EVENT, FRONT, SPOT, build_chain
+from tests.fixtures.market import BACK, BACKWARDATED, EVENT, FRONT, MONTHLIES, SPOT, build_chain
 
 CHAIN = build_chain(BACKWARDATED)
 
 
 def spread() -> CalendarSpread:
-    selected = SpreadSelector(back_offset_days=30).select(CHAIN, EVENT)
+    selected = SpreadSelector(30, 21).select(CHAIN, EVENT, MONTHLIES).spread
     assert selected is not None
     return selected
 
@@ -62,10 +62,11 @@ def test_spread_available_passes_with_a_spread() -> None:
 
 
 def test_spread_available_fails_without_a_spread() -> None:
-    result = SpreadAvailableFilter().check(SignalCandidate(candidate().metrics, CHAIN, None))
+    no_spread = SignalCandidate(candidate().metrics, CHAIN, None, "monthly not in the chain")
+    result = SpreadAvailableFilter().check(no_spread)
 
     assert not result.passed
-    assert result.detail
+    assert result.detail == "monthly not in the chain"
 
 
 def chain_with_call_quotes(front_bid: float, front_ask: float, front_oi: int) -> SignalCandidate:

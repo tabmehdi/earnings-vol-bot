@@ -34,8 +34,11 @@ from tests.fixtures.market import (
     CONTANGO,
     EVENT,
     FRONT,
+    MONTHLIES,
+    QUOTED_AT,
     RIGHTS,
     SPOT,
+    SPOT_AT,
     WIDE,
     build_chain,
     build_history,
@@ -65,7 +68,9 @@ def evaluator() -> SignalEvaluator:
             slope_horizon_days=filters.term_slope_horizon_days,
             max_iv_input_spread_pct=config.metrics.max_iv_input_spread_pct,
         ),
-        selector=SpreadSelector(config.structure.back_expiry_offset_days),
+        selector=SpreadSelector(
+            config.structure.back_target_days, config.structure.back_min_gap_days
+        ),
         filters=(
             AvgVolumeFilter(filters.min_avg_volume_30d),
             IvRvFilter(filters.min_iv30_rv30),
@@ -78,7 +83,7 @@ def evaluator() -> SignalEvaluator:
 
 
 def evaluate(chain: OptionChain, history: PriceHistory) -> Signal:
-    return evaluator().evaluate(MarketContext(EVENT, chain, history))
+    return evaluator().evaluate(MarketContext(EVENT, chain, history, MONTHLIES))
 
 
 def chain_recommended() -> Signal:
@@ -189,7 +194,9 @@ def test_empty_chain_gives_avoid_instead_of_raising() -> None:
 
 def test_unknown_timing_is_avoid_but_still_records_metrics_and_liquidity() -> None:
     event = EarningsEvent("AAPL", EVENT.report_date, ReportTiming.UNKNOWN)
-    context = MarketContext(event, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME))
+    context = MarketContext(
+        event, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME), MONTHLIES
+    )
 
     signal = evaluator().evaluate(context)
 
@@ -220,11 +227,54 @@ def test_context_rejects_a_chain_for_another_symbol() -> None:
     msft = EarningsEvent("MSFT", date(2026, 11, 19), ReportTiming.AMC)
 
     with pytest.raises(ValueError):
-        MarketContext(msft, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME))
+        MarketContext(
+            msft, build_chain(BACKWARDATED), build_history(CALM, LIQUID_VOLUME), MONTHLIES
+        )
 
 
 def test_context_rejects_history_for_another_symbol() -> None:
     other = PriceHistory("MSFT", build_history(CALM, LIQUID_VOLUME).bars)
 
     with pytest.raises(ValueError):
-        MarketContext(EVENT, build_chain(BACKWARDATED), other)
+        MarketContext(EVENT, build_chain(BACKWARDATED), other, MONTHLIES)
+
+
+# Prices recorded for later evaluation
+
+
+def test_signal_records_spot_and_both_legs_prices() -> None:
+    signal = chain_recommended()
+
+    prices = signal.prices
+    assert prices is not None and prices.front is not None and prices.back is not None
+    assert prices.spot == SPOT
+    assert prices.spot_at == SPOT_AT
+    front_quote = build_chain(BACKWARDATED).quote(signal.spread.front.contract)  # type: ignore[union-attr]
+    assert (prices.front.bid, prices.front.ask) == (front_quote.bid, front_quote.ask)
+    assert prices.front.mid == pytest.approx(front_quote.mid)
+    assert prices.front.quoted_at == QUOTED_AT
+    # The fixture prices the front ATM call at 0.90 IV and the December monthly at 0.50.
+    assert prices.front.iv == pytest.approx(0.90, abs=1e-6)
+    assert prices.back.iv == pytest.approx(0.50, abs=1e-6)
+    assert prices.debit_mid == pytest.approx(prices.back.mid - prices.front.mid)
+
+
+def test_prices_are_recorded_even_when_metrics_fail() -> None:
+    short_history = PriceHistory("AAPL", build_history(CALM, LIQUID_VOLUME).bars[-5:])
+
+    signal = evaluate(build_chain(BACKWARDATED), short_history)
+
+    assert signal.metrics is None
+    assert signal.prices is not None and signal.prices.debit_mid is not None
+
+
+def test_without_a_spread_only_spot_is_recorded() -> None:
+    front = (quote_at_iv(FRONT, 100.0, right, 0.90) for right in RIGHTS)
+    later = (quote_at_iv(BACK, 105.0, right, 0.50) for right in RIGHTS)
+    chain = OptionChain("AAPL", SPOT, AS_OF, (*front, *later))
+
+    prices = evaluate(chain, build_history(CALM, LIQUID_VOLUME)).prices
+
+    assert prices is not None
+    assert (prices.front, prices.back, prices.debit_mid) == (None, None, None)
+    assert prices.spot == SPOT

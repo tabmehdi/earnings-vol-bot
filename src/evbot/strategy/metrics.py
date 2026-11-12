@@ -103,6 +103,10 @@ class MetricsCalculator:
             return UnreliableQuotesError(f"front expiry {front} ATM spreads {spreads} over {limit}")
         return ValueError(f"no solvable ATM IV for front expiry {front}")
 
+    def implied_vol(self, chain: OptionChain, quote: OptionQuote) -> float | None:
+        """One quote's IV from its mid at the configured rate; None if it cannot be solved."""
+        return self._solve(chain, quote, self.rates.rate_for(chain.as_of.date()))
+
     def _solve(self, chain: OptionChain, quote: OptionQuote, rate: float) -> float | None:
         return self.solver.solve(
             quote.mid,

@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from evbot.app.trade_scheduler import TradeScheduler
 from evbot.domain.events import EarningsEvent, ReportTiming
@@ -16,6 +16,7 @@ from evbot.ports.snapshot_store import SnapshotStore
 from evbot.ports.trade_repository import TradeRepository
 from evbot.ports.trading_calendar import TradingCalendar
 from evbot.strategy.evaluator import MarketContext, SignalEvaluator
+from evbot.strategy.expiries import monthly_expiries
 from evbot.strategy.rates import ConstantRate
 
 MARKET_DATA = "market_data"
@@ -55,6 +56,7 @@ class Scanner:
     evaluator: SignalEvaluator
     scheduler: TradeScheduler
     history_bars: int
+    monthly_horizon_days: int
     fallback_rate: float
     rates: RiskFreeRateProvider | None = None
 
@@ -93,8 +95,12 @@ class Scanner:
             self.evaluator, metrics=replace(self.evaluator.metrics, rates=ConstantRate(rate))
         )
         last_completed = self.trading_calendar.previous_session(universe.today)
+        horizon = universe.today + timedelta(days=self.monthly_horizon_days)
+        monthlies = monthly_expiries(universe.today, horizon, self._is_session)
         events = universe.selected[:limit]
-        signals = tuple(self._signal(event, last_completed, evaluator) for event in events)
+        signals = tuple(
+            self._signal(event, last_completed, evaluator, monthlies) for event in events
+        )
         record = ScanRecord(
             kind,
             started,
@@ -121,8 +127,19 @@ class Scanner:
             logger.warning("%s; using the config rate %.4f", error, self.fallback_rate)
             return self.fallback_rate, "config"
 
+    def _is_session(self, day: date) -> bool:
+        try:
+            self.trading_calendar.close_time(day)
+        except TradingCalendarError:
+            return False
+        return True
+
     def _signal(
-        self, event: EarningsEvent, last_completed: date, evaluator: SignalEvaluator
+        self,
+        event: EarningsEvent,
+        last_completed: date,
+        evaluator: SignalEvaluator,
+        monthlies: tuple[date, ...],
     ) -> Signal:
         symbol = event.symbol
         try:
@@ -134,7 +151,7 @@ class Scanner:
             logger.warning("%s: %s", symbol, error)
             reason = FilterResult(MARKET_DATA, False, None, None, detail=str(error))
             return Signal(event, self.clock.now(), None, (reason,), Verdict.AVOID, spread=None)
-        signal = evaluator.evaluate(MarketContext(event, snapshot.chain, history))
+        signal = evaluator.evaluate(MarketContext(event, snapshot.chain, history, monthlies))
         freshness = FilterResult(
             QUOTE_FRESHNESS,
             True,

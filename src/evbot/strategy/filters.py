@@ -19,6 +19,7 @@ class SignalCandidate:
     metrics: SignalMetrics
     chain: OptionChain
     spread: CalendarSpread | None
+    spread_note: str = ""  # why there is no spread, from the selector
 
 
 class Filter(Protocol):
@@ -57,7 +58,11 @@ class SpreadAvailableFilter:
     def check(self, candidate: SignalCandidate) -> FilterResult:
         if candidate.spread is None:
             return FilterResult(
-                SPREAD_AVAILABLE, False, None, None, detail="no strike listed in both expiries"
+                SPREAD_AVAILABLE,
+                False,
+                None,
+                None,
+                detail=candidate.spread_note or "no calendar spread",
             )
         return FilterResult(SPREAD_AVAILABLE, True, None, None)
 

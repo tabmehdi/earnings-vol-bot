@@ -67,7 +67,9 @@ def build_evaluator(config: StrategyConfig) -> SignalEvaluator:
             slope_horizon_days=filters.term_slope_horizon_days,
             max_iv_input_spread_pct=config.metrics.max_iv_input_spread_pct,
         ),
-        selector=SpreadSelector(config.structure.back_expiry_offset_days),
+        selector=SpreadSelector(
+            config.structure.back_target_days, config.structure.back_min_gap_days
+        ),
         filters=(
             AvgVolumeFilter(filters.min_avg_volume_30d),
             IvRvFilter(filters.min_iv30_rv30),
@@ -129,6 +131,7 @@ def build_scanner(
             config.schedule.exit_minutes_after_open,
         ),
         history_bars=max(config.metrics.rv_window + 1, config.metrics.volume_window),
+        monthly_horizon_days=market.chain_max_days,
         fallback_rate=config.pricing.risk_free_rate,
         rates=rates,
     )

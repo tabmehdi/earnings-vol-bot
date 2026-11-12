@@ -13,7 +13,8 @@ def test_default_config_loads_strategy_thresholds(monkeypatch: pytest.MonkeyPatc
     assert config.filters.min_avg_volume_30d == 1_500_000
     assert config.filters.min_iv30_rv30 == 1.25
     assert config.filters.max_term_slope == -0.00406
-    assert config.structure.back_expiry_offset_days == 30
+    assert config.structure.back_target_days == 30
+    assert config.structure.back_min_gap_days == 21
 
 
 def test_misspelled_key_is_rejected(tmp_path: Path) -> None:

@@ -45,6 +45,9 @@ SESSIONS = dict(
         MONDAY,
         date(2026, 11, 25),
         date(2026, 11, 27),
+        date(2026, 12, 18),
+        date(2027, 1, 15),
+        date(2027, 2, 19),
     )
 )
 AAPL = EarningsEvent("AAPL", FRONT, ReportTiming.BMO)
@@ -58,10 +61,12 @@ def scanner_for(
     now: datetime = AS_OF,
     repository: InMemoryTradeRepository | None = None,
     rates: FixedRiskFreeRate | FailingRiskFreeRate | None = None,
+    sessions_without: date | None = None,
 ) -> tuple[Scanner, InMemorySnapshotStore, InMemoryTradeRepository]:
     store = InMemorySnapshotStore()
     repository = repository if repository is not None else InMemoryTradeRepository()
-    calendar = FakeTradingCalendar(SESSIONS)
+    sessions = {day: times for day, times in SESSIONS.items() if day != sessions_without}
+    calendar = FakeTradingCalendar(sessions)
     scanner = Scanner(
         clock=FixedClock(now),
         trading_calendar=calendar,
@@ -74,6 +79,7 @@ def scanner_for(
             calendar, entry_minutes_before_close=15, exit_minutes_after_open=15
         ),
         history_bars=31,
+        monthly_horizon_days=75,
         rates=rates,
         fallback_rate=FALLBACK_RATE,
     )
@@ -303,3 +309,25 @@ def test_no_provider_falls_back_to_config_with_a_warning(caplog: pytest.LogCaptu
 
     assert (record.risk_free_rate, record.rate_source) == (FALLBACK_RATE, "config")
     assert "no risk-free rate source" in caplog.text
+
+
+# Monthly back leg
+
+
+def test_the_back_leg_is_the_standard_monthly_from_the_calendar() -> None:
+    record, _, _ = run((AAPL,))
+
+    spread = record.signals[0].spread
+    assert spread is not None
+    assert spread.back.contract.expiry == date(2026, 12, 18)
+
+
+def test_a_holiday_friday_moves_the_monthly_to_thursday() -> None:
+    # Without Dec 18 as a session, December's monthly would be Thursday Dec 17, which the
+    # fixture chain does not list: no spread, explained.
+    scanner, _, _ = scanner_for((AAPL,), sessions_without=date(2026, 12, 18))
+
+    record = scanner.run(scanner.find_reports(), ScanKind.SCHEDULED)
+
+    failed = {r.name: r.detail for r in record.signals[0].failed()}
+    assert "2026-12-17" in failed["spread_available"]

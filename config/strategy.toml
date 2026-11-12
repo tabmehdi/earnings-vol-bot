@@ -7,7 +7,8 @@ max_term_slope = -0.00406      # per day, front expiry to 45d
 term_slope_horizon_days = 45
 
 [structure]
-back_expiry_offset_days = 30   # back = expiry closest to front + 30 days
+back_target_days = 30   # back = standard monthly closest to front + 30 days (ADR 0006)
+back_min_gap_days = 21  # ...and at least this many days after the front
 
 [schedule]
 entry_minutes_before_close = 15

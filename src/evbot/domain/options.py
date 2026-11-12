@@ -34,6 +34,7 @@ class OptionQuote:
     iv: float | None
     open_interest: int
     volume: int
+    quoted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.bid < 0:
@@ -60,6 +61,7 @@ class OptionChain:
     spot: float
     as_of: datetime
     quotes: tuple[OptionQuote, ...]
+    spot_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.spot <= 0:

@@ -359,3 +359,20 @@ def test_history_failure_is_a_market_data_error() -> None:
 
     with pytest.raises(MarketDataError):
         server.adapter().get_history("AAPL", LAST_SESSION, 31)
+
+
+def test_each_quote_keeps_its_own_time_and_the_chain_keeps_the_spot_time() -> None:
+    server = server_with(snapshots={CALL: option_snapshot(age_seconds=40)})
+
+    chain = server.adapter().get_chain("AAPL").chain
+
+    assert chain.quotes[0].quoted_at == SCAN_TIME - timedelta(seconds=40)
+    # The default IEX quote in the fake server is one second old.
+    assert chain.spot_at == SCAN_TIME - timedelta(seconds=1)
+
+
+def test_spot_from_the_trade_fallback_keeps_the_trade_time() -> None:
+    server = server_with()
+    server.stock_quote = None
+
+    assert server.adapter().get_chain("AAPL").chain.spot_at == SCAN_TIME - timedelta(seconds=1)

@@ -21,6 +21,7 @@ CHAIN_SCHEMA = pa.schema(
         ("iv", pa.float64()),
         ("open_interest", pa.int64()),
         ("volume", pa.int64()),
+        ("quoted_at", pa.timestamp("us", tz="UTC")),
     ]
 )
 HISTORY_SCHEMA = pa.schema(
@@ -53,12 +54,14 @@ class ParquetSnapshotStore:
                 "iv": q.iv,
                 "open_interest": q.open_interest,
                 "volume": q.volume,
+                "quoted_at": q.quoted_at,
             }
             for q in chain.quotes
         ]
         metadata = {
             "underlying": chain.underlying,
             "spot": repr(chain.spot),
+            "spot_at": chain.spot_at.isoformat() if chain.spot_at else "",
             "as_of": chain.as_of.isoformat(),
             "stale_quotes_dropped": str(snapshot.stale_quotes_dropped),
             **self._feed_metadata(snapshot.feeds),
@@ -77,6 +80,7 @@ class ParquetSnapshotStore:
                 float(metadata["spot"]),
                 datetime.fromisoformat(metadata["as_of"]),
                 quotes,
+                spot_at=_optional_time(metadata.get("spot_at")),
             )
             feeds = DataFeeds(
                 metadata["options_feed"], metadata["spot_feed"], metadata["history_feed"]
@@ -146,5 +150,15 @@ class ParquetSnapshotStore:
             symbol, row["expiry"], row["strike"], OptionRight(row["right"]), row["multiplier"]
         )
         return OptionQuote(
-            contract, row["bid"], row["ask"], row["iv"], row["open_interest"], row["volume"]
+            contract,
+            row["bid"],
+            row["ask"],
+            row["iv"],
+            row["open_interest"],
+            row["volume"],
+            row.get("quoted_at"),  # files written before quote times were kept lack it
         )
+
+
+def _optional_time(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None

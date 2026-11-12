@@ -65,6 +65,34 @@ class AlpacaMarketData:
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             raise MarketDataError(f"{symbol}: unexpected Alpaca format: {error!r}") from error
 
+    def get_leg_quotes(
+        self, contracts: Sequence[OptionContract]
+    ) -> Mapping[OptionContract, OptionQuote]:
+        by_symbol = {occ_symbol(contract): contract for contract in contracts}
+        params = {"symbols": ",".join(by_symbol), "feed": self._feeds.options}
+        url = f"{self._data_url}/v1beta1/options/quotes/latest"
+        try:
+            found = self._http.get(url, params, self._headers)["quotes"] or {}
+            quotes = {}
+            for symbol, contract in by_symbol.items():
+                if symbol not in found:
+                    raise MarketDataError(f"no quote for {symbol}")
+                market = found[symbol]
+                quotes[contract] = OptionQuote(
+                    contract,
+                    float(market["bp"]),
+                    float(market["ap"]),
+                    None,
+                    open_interest=0,  # not in this endpoint; it is on the recorded chain
+                    volume=0,
+                    quoted_at=_timestamp(market.get("t")),
+                )
+            return quotes
+        except HttpRequestError as error:
+            raise MarketDataError(f"leg quotes: {error}") from error
+        except (KeyError, TypeError, ValueError) as error:
+            raise MarketDataError(f"leg quotes: unusable quote: {error!r}") from error
+
     def get_history(self, symbol: str, end: date, bars: int) -> PriceHistory:
         # Twice the session count plus a margin always spans enough weekends and holidays.
         start = end - timedelta(days=bars * 2 + 10)
@@ -283,3 +311,10 @@ def _is_standard(row: Any, symbol: str) -> bool:
         and float(row["multiplier"]) == STANDARD_CONTRACT_SIZE
         and float(row["size"]) == STANDARD_CONTRACT_SIZE
     )
+
+
+def occ_symbol(contract: OptionContract) -> str:
+    """Alpaca's option symbol: root, YYMMDD, C or P, strike in thousandths on 8 digits."""
+    right = "C" if contract.right is OptionRight.CALL else "P"
+    strike = round(contract.strike * 1000)
+    return f"{contract.underlying}{contract.expiry:%y%m%d}{right}{strike:08d}"

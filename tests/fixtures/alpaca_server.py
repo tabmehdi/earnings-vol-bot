@@ -84,6 +84,7 @@ class AlpacaServer:
     contract_pages: list[list[dict[str, Any]]] = field(default_factory=list)
     bar_pages: list[list[dict[str, Any]]] = field(default_factory=list)
     unfiltered_contracts: list[dict[str, Any]] = field(default_factory=list)
+    leg_quotes: dict[str, dict[str, Any]] = field(default_factory=dict)
     status: int = 200
     requests: list[SeenRequest] = field(default_factory=list)
 
@@ -105,6 +106,10 @@ class AlpacaServer:
         if path == "/v2/options/contracts":
             page, token = self._page(self.contract_pages, request)
             return response(200, {"option_contracts": page, "next_page_token": token})
+        if path == "/v1beta1/options/quotes/latest":
+            wanted = request.url.params["symbols"].split(",")
+            found = {s: self.leg_quotes[s] for s in wanted if s in self.leg_quotes}
+            return response(200, {"quotes": found})
         if path == "/v2/stocks/bars":
             page, token = self._page(self.bar_pages, request)
             return response(200, {"bars": {"AAPL": page}, "next_page_token": token})

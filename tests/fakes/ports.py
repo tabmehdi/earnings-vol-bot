@@ -1,9 +1,10 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from evbot.domain.events import EarningsEvent
+from evbot.domain.options import OptionContract, OptionQuote
 from evbot.domain.prices import PriceHistory
 from evbot.domain.scans import ScanRecord
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
@@ -24,6 +25,24 @@ class FixedClock:
     def now(self) -> datetime:
         return self.moment
 
+    def wait(self, seconds: float) -> None:
+        pass
+
+
+@dataclass(slots=True)
+class AdvancingClock:
+    """Time moves only when the code under test waits, so waits are instant and exact."""
+
+    moment: datetime
+    waited: list[float] = field(default_factory=list)
+
+    def now(self) -> datetime:
+        return self.moment
+
+    def wait(self, seconds: float) -> None:
+        self.waited.append(seconds)
+        self.moment += timedelta(seconds=seconds)
+
 
 @dataclass(frozen=True, slots=True)
 class FakeEarningsCalendar:
@@ -40,6 +59,17 @@ class FakeMarketData:
     skips: dict[str, str] = field(default_factory=dict)
     screen_fails: bool = False
     asked: list[str] = field(default_factory=list)
+    leg_quotes: dict[OptionContract, OptionQuote] = field(default_factory=dict)
+
+    def get_leg_quotes(
+        self, contracts: Sequence[OptionContract]
+    ) -> dict[OptionContract, OptionQuote]:
+        found = {q.contract: q for s in self.chains.values() for q in s.chain.quotes}
+        found.update(self.leg_quotes)
+        missing = [c for c in contracts if c not in found]
+        if missing:
+            raise MarketDataError(f"no quote for {missing[0]}")
+        return {c: found[c] for c in contracts}
 
     def screen(self, symbols: Sequence[str]) -> dict[str, str]:
         if self.screen_fails:

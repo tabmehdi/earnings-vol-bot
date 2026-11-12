@@ -24,3 +24,7 @@ class RepositoryError(PortError):
 
 class RiskFreeRateError(PortError):
     pass
+
+
+class BrokerError(PortError):
+    pass

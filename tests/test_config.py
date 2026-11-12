@@ -68,3 +68,21 @@ def test_default_config_loads_market_data_and_storage(monkeypatch: pytest.Monkey
     assert config.storage.logs_dir == "data/logs"
     assert config.storage.locks_dir == "data/locks"
     assert config.schedule.scan_start == "15:25"
+
+
+def test_default_config_loads_session_and_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+
+    config = load_config()
+
+    assert config.schedule.session_start == "09:00"
+    assert config.schedule.scan_minutes_before_close == 35
+    assert config.schedule.entry_cutoff_minutes_before_close == 5
+    assert config.schedule.exit_deadline_time == "15:00"
+    assert config.execution.max_risk_per_trade_pct == 0.02
+    assert config.execution.max_contracts == 10
+    assert config.execution.max_spread_cost_pct == 0.35
+    assert config.execution.max_open_positions == 5
+    assert config.execution.max_committed_pct == 0.20
+    assert config.execution.walk_steps == 5
+    assert config.storage.trades_dir == "data/trades"

@@ -10,8 +10,11 @@ CENT_TOLERANCE = 1e-9  # so 2.1000000000000005 rounds as 2.10, not 2.11
 
 
 class PricingPolicy(Protocol):
-    steps: int
-    step_seconds: float
+    @property
+    def steps(self) -> int: ...
+
+    @property
+    def step_seconds(self) -> float: ...
 
     def limit(
         self, intent: OrderIntent, attempt: int, front: OptionQuote, back: OptionQuote

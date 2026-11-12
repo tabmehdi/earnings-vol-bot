@@ -13,7 +13,15 @@ back_min_gap_days = 21  # ...and at least this many days after the front
 [schedule]
 entry_minutes_before_close = 15
 exit_minutes_after_open = 15
-scan_start = "15:25"            # New York time; the daily scan must finish before the entry time
+scan_start = "15:25"            # New York time; the scan-only timer (Phase 4)
+session_start = "09:00"         # New York time; the trading session starts here (Phase 5)
+scan_minutes_before_close = 35
+entry_cutoff_minutes_before_close = 5   # no new order after this
+recheck_count = 2               # fresh looks at the candidates before entering
+recheck_gap_seconds = 60
+exit_retry_minutes = 15
+exit_deadline_time = "15:00"    # New York, on the front leg's expiry day
+exit_deadline_minutes_before_close = 60   # earlier on an early-close day
 
 [pricing]
 risk_free_rate = 0.045          # fallback when FRED is unavailable or FRED_API_KEY is unset
@@ -44,8 +52,19 @@ fred_url = "https://api.stlouisfed.org/fred/series/observations"
 fred_series = "DGS3MO"           # 3-month Treasury constant maturity, in percent
 fred_requests_per_minute = 30    # FRED allows 120; a scan makes one request
 
+[execution]
+max_risk_per_trade_pct = 0.02  # a calendar can lose its debit: that is the risk
+max_contracts = 10
+max_spread_cost_pct = 0.35     # provisional; calibrate from the recorded scans (ADR)
+max_open_positions = 5
+max_committed_pct = 0.20
+walk_steps = 5
+walk_step_seconds = 20
+entry_cap_fraction = 0.5       # entries never pay more than mid + 50% of half-width
+
 [storage]
 snapshot_dir = "data/snapshots"
 signals_dir = "data/signals"
 logs_dir = "data/logs"
 locks_dir = "data/locks"
+trades_dir = "data/trades"

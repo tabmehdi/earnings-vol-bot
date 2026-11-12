@@ -6,12 +6,13 @@ import os
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
+from evbot.adapters.alpaca_broker import AlpacaBroker
 from evbot.adapters.alpaca_market_data import AlpacaMarketData
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
 from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
@@ -21,13 +22,16 @@ from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.adapters.parquet_snapshot_store import ParquetSnapshotStore
 from evbot.adapters.rate_limiter import TokenBucket
+from evbot.app.execution import ExecutionService
 from evbot.app.scanner import MARKET_DATA, QUOTE_FRESHNESS, Scanner, ScanUniverse
 from evbot.app.trade_scheduler import TradeScheduler
+from evbot.app.trading_bot import SessionSettings, TradingBot
 from evbot.config import MarketDataConfig, StrategyConfig, load_config
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import Signal, Verdict
 from evbot.domain.snapshots import DataFeeds
+from evbot.ports.errors import BrokerError
 from evbot.scan_lock import ScanLock
 from evbot.strategy.evaluator import SignalEvaluator
 from evbot.strategy.filters import (
@@ -39,8 +43,11 @@ from evbot.strategy.filters import (
 )
 from evbot.strategy.implied_vol import ImpliedVolSolver
 from evbot.strategy.metrics import MetricsCalculator
+from evbot.strategy.pricing import MidWalkPolicy
 from evbot.strategy.rates import ConstantRate
+from evbot.strategy.risk import RiskManager
 from evbot.strategy.selection import SpreadSelector
+from evbot.strategy.sizing import FixedRiskSizer
 from evbot.strategy.verdict import DefaultVerdictPolicy
 from evbot.strategy.volatility import YangZhangEstimator
 
@@ -123,7 +130,9 @@ def build_scanner(
             max_quote_age_seconds=market.max_quote_age_seconds,
         ),
         store=ParquetSnapshotStore(Path(config.storage.snapshot_dir)),
-        repository=JsonlTradeRepository(Path(config.storage.signals_dir)),
+        repository=JsonlTradeRepository(
+            Path(config.storage.signals_dir), Path(config.storage.trades_dir)
+        ),
         evaluator=build_evaluator(config),
         scheduler=TradeScheduler(
             calendar,
@@ -145,6 +154,60 @@ def build_rates(
         return None
     http = build_http(config, session, config.fred_requests_per_minute)
     return FredRiskFreeRate(http, config.fred_url, config.fred_series, api_key)
+
+
+def build_trading_bot(
+    config: StrategyConfig,
+    clock: MarketClock,
+    scanner: Scanner,
+    alpaca_http: RequestsJsonHttpClient,
+    key_id: str,
+    secret_key: str,
+    paper: bool,
+) -> TradingBot:
+    """Raises BrokerError unless paper trading is configured."""
+    execution_config = config.execution
+    broker = AlpacaBroker(
+        alpaca_http, clock, config.market_data.trading_base_url, key_id, secret_key, paper
+    )
+    pricing = MidWalkPolicy(
+        execution_config.walk_steps,
+        execution_config.walk_step_seconds,
+        execution_config.entry_cap_fraction,
+    )
+    execution = ExecutionService(broker, scanner.market_data, pricing, scanner.repository, clock)
+    return TradingBot(
+        clock,
+        scanner.trading_calendar,
+        scanner,
+        execution,
+        broker,
+        scanner.market_data,
+        scanner.repository,
+        scanner.scheduler,
+        FixedRiskSizer(execution_config.max_risk_per_trade_pct, execution_config.max_contracts),
+        RiskManager(
+            execution_config.max_spread_cost_pct,
+            execution_config.max_open_positions,
+            execution_config.max_committed_pct,
+        ),
+        session_settings(config),
+    )
+
+
+def session_settings(config: StrategyConfig) -> SessionSettings:
+    schedule = config.schedule
+    return SessionSettings(
+        exit_minutes_after_open=schedule.exit_minutes_after_open,
+        scan_minutes_before_close=schedule.scan_minutes_before_close,
+        entry_minutes_before_close=schedule.entry_minutes_before_close,
+        entry_cutoff_minutes_before_close=schedule.entry_cutoff_minutes_before_close,
+        recheck_count=schedule.recheck_count,
+        recheck_gap_seconds=schedule.recheck_gap_seconds,
+        exit_retry_minutes=schedule.exit_retry_minutes,
+        exit_deadline_time=time.fromisoformat(schedule.exit_deadline_time),
+        exit_deadline_minutes_before_close=schedule.exit_deadline_minutes_before_close,
+    )
 
 
 def parse_tickers(text: str) -> tuple[str, ...]:
@@ -218,6 +281,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="evbot.main_live")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("scan", help="the unattended daily scan; logs to the logs folder")
+    commands.add_parser(
+        "session", help="the trading day: exits, scan and paper entries; logs to the logs folder"
+    )
     preview_command = commands.add_parser(
         "preview", help="run this scan's earnings tickers and print the table; never trades"
     )
@@ -240,7 +306,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment or .env")
 
     config = load_config()
-    if args.command == "scan":
+    if args.command == "session":
+        _run_session(config, key_id, secret_key, fred_key)
+    elif args.command == "scan":
         _run_scheduled(config, key_id, secret_key, fred_key)
     else:
         _run_preview(config, key_id, secret_key, fred_key, tickers, args.limit)
@@ -326,6 +394,53 @@ def _scheduled_scan(
     logger.info(format_summary(scan, alpaca_http.request_count, nasdaq_http.request_count))
     if scan.finished_before_entry is False:
         logger.warning("scan finished after the earliest entry time %s", scan.entry_deadline)
+
+
+def _run_session(
+    config: StrategyConfig, key_id: str, secret_key: str, fred_key: str | None
+) -> None:
+    """Exit code 1 lets systemd restart a crash; 2 (configuration) stops it."""
+    clock = MarketClock()
+    today = clock.now().date()
+    handlers = _log_to(Path(config.storage.logs_dir) / f"session_{today:%Y-%m-%d}.log")
+    lock = ScanLock(Path(config.storage.locks_dir) / f"session_{today:%Y-%m-%d}.lock")
+    try:
+        if not lock.acquire():
+            logger.info("another session is running (lock %s); exiting", lock.path)
+            return
+        logger.info("session started for %s", today)
+        market = config.market_data
+        with (
+            requests.Session() as alpaca_session,
+            requests.Session() as nasdaq_session,
+            requests.Session() as fred_session,
+        ):
+            alpaca_http = build_http(market, alpaca_session, market.alpaca_requests_per_minute)
+            nasdaq_http = build_http(market, nasdaq_session, market.nasdaq_requests_per_minute)
+            rates = build_rates(market, fred_session, fred_key)
+            scanner = build_scanner(
+                config, clock, alpaca_http, nasdaq_http, key_id, secret_key, rates
+            )
+            paper = os.environ.get("ALPACA_PAPER", "").lower() == "true"
+            try:
+                bot = build_trading_bot(
+                    config, clock, scanner, alpaca_http, key_id, secret_key, paper
+                )
+            except BrokerError as error:
+                logger.error("%s", error)
+                raise SystemExit(2) from None
+            bot.run_session()
+        logger.info("session finished")
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("session failed")
+        raise SystemExit(1) from None
+    finally:
+        lock.release()
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
 
 
 def _log_to(path: Path) -> list[logging.Handler]:

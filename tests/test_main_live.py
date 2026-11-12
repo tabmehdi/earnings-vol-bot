@@ -13,6 +13,7 @@ from evbot.domain.options import OptionContract, OptionRight
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import FilterResult, Signal, SignalMetrics, Verdict
 from evbot.domain.spreads import CalendarSpread, Leg, Side
+from evbot.ports.errors import BrokerError
 from evbot.scan_lock import ScanLock
 from tests.fixtures.market import AS_OF, FRONT
 
@@ -165,6 +166,7 @@ def config_in(tmp_path: Path) -> StrategyConfig:
         signals_dir=str(tmp_path / "signals"),
         logs_dir=str(tmp_path / "logs"),
         locks_dir=str(tmp_path / "locks"),
+        trades_dir=str(tmp_path / "trades"),
     )
     return replace(config, storage=storage)
 
@@ -289,3 +291,77 @@ def test_refuses_to_start_without_keys(
 def test_a_subcommand_is_required() -> None:
     with pytest.raises(SystemExit):
         main_live.main([])
+
+
+# The trading session
+
+
+class StubBot:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.runs = 0
+
+    def run_session(self) -> None:
+        self.runs += 1
+        if self.fail:
+            raise RuntimeError("session boom")
+
+
+def run_session_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bot: StubBot | Exception
+) -> None:
+    def build(*_: object) -> StubBot:
+        if isinstance(bot, Exception):
+            raise bot
+        return bot
+
+    monkeypatch.setattr(main_live, "build_trading_bot", build)
+    run_main(monkeypatch, tmp_path, StubScanner(), "session")
+
+
+def session_log(tmp_path: Path) -> str:
+    (log,) = (tmp_path / "logs").glob("session_*.log")
+    return log.read_text(encoding="utf-8")
+
+
+def test_session_runs_the_bot_and_logs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bot = StubBot()
+
+    run_session_command(monkeypatch, tmp_path, bot)
+
+    assert bot.runs == 1
+    assert "session started" in session_log(tmp_path)
+    assert not list((tmp_path / "locks").glob("*.lock"))
+
+
+def test_a_crashed_session_exits_1_so_systemd_restarts_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        run_session_command(monkeypatch, tmp_path, StubBot(fail=True))
+
+    assert exit_info.value.code == 1
+    assert "session boom" in session_log(tmp_path)
+
+
+def test_refusing_live_trading_exits_2_so_systemd_does_not_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        run_session_command(monkeypatch, tmp_path, BrokerError("only trades the paper account"))
+
+    assert exit_info.value.code == 2
+    assert "paper" in session_log(tmp_path)
+
+
+def test_a_second_session_the_same_day_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    held = ScanLock(tmp_path / "locks" / f"session_{main_live.MarketClock().now():%Y-%m-%d}.lock")
+    held.acquire()
+    bot = StubBot()
+
+    run_session_command(monkeypatch, tmp_path, bot)
+
+    assert bot.runs == 0
+    assert "another session is running" in session_log(tmp_path)

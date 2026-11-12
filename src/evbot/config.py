@@ -28,6 +28,14 @@ class ScheduleConfig:
     entry_minutes_before_close: int
     exit_minutes_after_open: int
     scan_start: str
+    session_start: str
+    scan_minutes_before_close: int
+    entry_cutoff_minutes_before_close: int
+    recheck_count: int
+    recheck_gap_seconds: float
+    exit_retry_minutes: int
+    exit_deadline_time: str
+    exit_deadline_minutes_before_close: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +79,19 @@ class StorageConfig:
     signals_dir: str
     logs_dir: str
     locks_dir: str
+    trades_dir: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionConfig:
+    max_risk_per_trade_pct: float
+    max_contracts: int
+    max_spread_cost_pct: float
+    max_open_positions: int
+    max_committed_pct: float
+    walk_steps: int
+    walk_step_seconds: float
+    entry_cap_fraction: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +103,7 @@ class StrategyConfig:
     metrics: MetricsConfig
     market_data: MarketDataConfig
     storage: StorageConfig
+    execution: ExecutionConfig
 
 
 def config_path() -> Path:
@@ -101,4 +123,5 @@ def load_config(path: Path | None = None) -> StrategyConfig:
         metrics=MetricsConfig(**raw["metrics"]),
         market_data=MarketDataConfig(**raw["market_data"]),
         storage=StorageConfig(**raw["storage"]),
+        execution=ExecutionConfig(**raw["execution"]),
     )

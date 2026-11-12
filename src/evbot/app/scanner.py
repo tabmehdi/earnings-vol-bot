@@ -88,6 +88,16 @@ class Scanner:
         events = tuple(EarningsEvent(t, next_session, ReportTiming.BMO) for t in tickers)
         return ScanUniverse(today, next_session, (), events)
 
+    def recheck(self, events: Sequence[EarningsEvent]) -> ScanRecord:
+        """The same scan, again, on just these reports; recorded as a recheck."""
+        today = self.clock.now().date()
+        amc_today = tuple(e for e in events if e.timing is ReportTiming.AMC)
+        next_morning = tuple(e for e in events if e.timing is not ReportTiming.AMC)
+        universe = ScanUniverse(
+            today, self.trading_calendar.next_session(today), amc_today, next_morning
+        )
+        return self.run(universe, ScanKind.RECHECK)
+
     def run(self, universe: ScanUniverse, kind: ScanKind, limit: int | None = None) -> ScanRecord:
         started = self.clock.now()
         rate, source = self._risk_free_rate(universe.today)

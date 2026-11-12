@@ -9,6 +9,7 @@ class ScanKind(Enum):
     SCHEDULED = "scheduled"  # the unattended daily run
     PREVIEW = "preview"  # a manual run of the same scan
     TICKERS = "tickers"  # a manual run on chosen tickers, not real earnings dates
+    RECHECK = "recheck"  # a fresh look at the candidates just before entering
 
 
 @dataclass(frozen=True, slots=True)

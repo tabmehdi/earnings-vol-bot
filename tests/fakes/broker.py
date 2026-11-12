@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 
 from evbot.domain.options import OptionContract
 from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket
@@ -23,6 +24,7 @@ class FakeBroker:
     partial_fill: int | None = None
     fill_at_or_above: float | None = None
     reject: bool = False
+    fill_from: datetime | None = None  # nothing fills before this time
     held: dict[OptionContract, int] = field(default_factory=lambda: defaultdict(int))
     orders: dict[str, OrderTicket] = field(default_factory=dict)
     latest_by_client: dict[str, str] = field(default_factory=dict)
@@ -98,6 +100,8 @@ class FakeBroker:
 
     def _fills_now(self, ticket: OrderTicket) -> bool:
         if self.fill_on_check is None or self._checks[ticket.client_order_id] < self.fill_on_check:
+            return False
+        if self.fill_from is not None and self.clock.now() < self.fill_from:
             return False
         if self.fill_at_or_above is None:
             return True

@@ -10,6 +10,11 @@ class OrderIntent(Enum):
     CLOSE = "close"  # sell the calendar: receive a credit
 
 
+class SpreadLeg(Enum):
+    FRONT = "front"
+    BACK = "back"
+
+
 class OrderStatus(Enum):
     WORKING = "working"
     PARTIALLY_FILLED = "partially_filled"
@@ -23,8 +28,12 @@ DONE = frozenset({OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTE
 
 @dataclass(frozen=True, slots=True)
 class OrderTicket:
-    """One broker order for a whole calendar. Prices are per spread: a debit to open,
-    a credit to close. client_order_id is ours, so a restarted session can find it again."""
+    """One broker order: the whole calendar, or one of its legs when leg is set (a legged exit).
+
+    A calendar order is priced per spread (a debit to open, a credit to close); a leg order per
+    contract of that leg. Prices are always positive. client_order_id is ours, so a restarted
+    session can find the order again.
+    """
 
     order_id: str
     client_order_id: str
@@ -36,6 +45,7 @@ class OrderTicket:
     submitted_at: datetime
     filled_quantity: int = 0
     fill_price: float | None = None
+    leg: SpreadLeg | None = None
 
     def __post_init__(self) -> None:
         if self.submitted_at.utcoffset() is None:

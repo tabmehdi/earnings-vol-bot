@@ -1,7 +1,7 @@
 """Calls the real services. Run in US market hours: quotes older than 5 min are dropped."""
 
 import os
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 import requests
@@ -15,7 +15,9 @@ from evbot.adapters.http_client import RequestsJsonHttpClient
 from evbot.adapters.market_clock import MarketClock
 from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.config import load_config
+from evbot.domain.options import OptionContract, OptionRight
 from evbot.domain.snapshots import DataFeeds
+from evbot.domain.spreads import CalendarSpread, Leg, Side
 
 pytestmark = pytest.mark.integration
 
@@ -156,4 +158,7 @@ def test_paper_account_allows_multi_leg_options(keys: tuple[str, str]) -> None:
 def test_paper_broker_reads_equity_holdings_and_orders(broker: AlpacaBroker) -> None:
     assert broker.account_equity() > 0
     assert all(isinstance(qty, int) for qty in broker.held_contracts().values())
-    assert broker.find_order("evbot-integration-test-no-such-order") is None
+    front = OptionContract("SPY", date(2030, 1, 18), 500.0, OptionRight.CALL)
+    back = OptionContract("SPY", date(2030, 2, 15), 500.0, OptionRight.CALL)
+    spread = CalendarSpread(Leg(front, Side.SELL), Leg(back, Side.BUY))
+    assert broker.find_order("evbot-integration-test-no-such-order", spread) is None

@@ -54,6 +54,36 @@ def order_json(
     }
 
 
+def leg_order_json(
+    order_id: str = "a1",
+    client_order_id: str = "AAPL-2026-11-20-close-front",
+    symbol: str = FRONT_OCC,
+    side: str = "buy",
+    position_intent: str = "buy_to_close",
+    status: str = "new",
+    filled_qty: str = "0",
+    filled_avg_price: str | None = None,
+    qty: str = "3",
+    limit_price: str = "1.10",
+) -> dict[str, Any]:
+    """A single-leg option order as Alpaca returns it: the contract is at the top level."""
+    return {
+        "id": order_id,
+        "client_order_id": client_order_id,
+        "order_class": "simple",
+        "symbol": symbol,
+        "side": side,
+        "position_intent": position_intent,
+        "status": status,
+        "qty": qty,
+        "filled_qty": filled_qty,
+        "filled_avg_price": filled_avg_price,
+        "limit_price": limit_price,
+        "submitted_at": "2026-11-19T20:45:00.123456789Z",
+        "legs": None,
+    }
+
+
 @dataclass
 class AlpacaTradingServer:
     orders: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -90,6 +120,19 @@ class AlpacaTradingServer:
         if any(o["client_order_id"] == body["client_order_id"] for o in self.orders.values()):
             return response(422, {"message": "client_order_id must be unique"})
         order_id = f"a{len(self.orders) + 1}"
+        if "legs" not in body:
+            order = leg_order_json(
+                order_id,
+                body["client_order_id"],
+                body["symbol"],
+                body["side"],
+                body["position_intent"],
+                self.next_status,
+                qty=body["qty"],
+                limit_price=body["limit_price"],
+            )
+            self.orders[order_id] = order
+            return response(200, order)
         opening = body["legs"][0]["position_intent"].endswith("open")
         order = order_json(
             order_id,

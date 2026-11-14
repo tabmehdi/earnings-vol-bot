@@ -4,6 +4,7 @@ import pytest
 
 from evbot.domain.options import OptionContract, OptionQuote, OptionRight
 from evbot.domain.orders import OrderIntent
+from evbot.domain.spreads import Side
 from evbot.strategy.pricing import MidWalkPolicy
 
 POLICY = MidWalkPolicy(steps=5, step_seconds=20, entry_cap_fraction=0.5)
@@ -66,3 +67,37 @@ def test_attempts_outside_the_walk_are_an_error() -> None:
 def test_needs_at_least_two_steps(steps: int) -> None:
     with pytest.raises(ValueError):
         MidWalkPolicy(steps=steps, step_seconds=20, entry_cap_fraction=0.5)
+
+
+# One leg at a time (a legged exit)
+
+
+def test_buying_a_leg_walks_from_the_mid_up_to_the_ask() -> None:
+    # Front 1.00/1.20: mid 1.10 to ask 1.20 in steps of 0.025, floored to cents.
+    prices = [POLICY.leg_limit(Side.BUY, attempt, FRONT) for attempt in range(POLICY.steps)]
+
+    assert prices == pytest.approx([1.10, 1.12, 1.15, 1.17, 1.20])
+
+
+def test_selling_a_leg_walks_from_the_mid_down_to_the_bid() -> None:
+    # Back 3.00/3.40: mid 3.20 to bid 3.00 in steps of 0.05.
+    prices = [POLICY.leg_limit(Side.SELL, attempt, BACK) for attempt in range(POLICY.steps)]
+
+    assert prices == pytest.approx([3.20, 3.15, 3.10, 3.05, 3.00])
+
+
+def test_a_leg_at_natural_buys_at_the_ask_and_sells_at_the_bid() -> None:
+    assert POLICY.leg_natural(Side.BUY, FRONT) == pytest.approx(1.20)
+    assert POLICY.leg_natural(Side.SELL, BACK) == pytest.approx(3.00)
+
+
+def test_a_leg_sale_is_never_below_one_cent() -> None:
+    worthless = quote(date(2026, 12, 18), 0.00, 0.02)
+
+    assert POLICY.leg_natural(Side.SELL, worthless) == pytest.approx(0.01)
+    assert POLICY.leg_limit(Side.SELL, POLICY.steps - 1, worthless) == pytest.approx(0.01)
+
+
+def test_leg_attempts_outside_the_walk_are_an_error() -> None:
+    with pytest.raises(ValueError):
+        POLICY.leg_limit(Side.BUY, POLICY.steps, FRONT)

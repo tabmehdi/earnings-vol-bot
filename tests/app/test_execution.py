@@ -5,7 +5,7 @@ import pytest
 
 from evbot.app.execution import ExecutionService
 from evbot.domain.options import OptionContract, OptionQuote, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus
+from evbot.domain.orders import OrderIntent, OrderStatus, SpreadLeg
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.domain.trades import Fill, Position
 from evbot.strategy.pricing import MidWalkPolicy
@@ -198,3 +198,129 @@ def test_an_unfilled_close_leaves_the_position_open() -> None:
 
     assert closed is None
     assert remaining == OPENED
+
+
+# Closing leg by leg, when the broker refuses the mleg close
+# Front 1.00/1.20 is bought back at its mid 1.10; back 3.00/3.40 is sold at its mid 3.20.
+
+
+def legs_sent(broker: FakeBroker) -> list[SpreadLeg | None]:
+    return [ticket.leg for ticket in broker.submitted]
+
+
+def holding_the_calendar(broker: FakeBroker) -> None:
+    broker.held[FRONT], broker.held[BACK] = -3, 3
+
+
+def test_a_rejected_mleg_close_buys_back_the_front_then_sells_the_back() -> None:
+    execution, broker, repository = service(reject_calendar_closes=True)
+    holding_the_calendar(broker)
+
+    closed, remaining = close_trade(execution)
+
+    assert legs_sent(broker) == [None, SpreadLeg.FRONT, SpreadLeg.BACK]
+    assert [t.client_order_id for t in broker.submitted[1:]] == [
+        f"{CID}-close-1-front",
+        f"{CID}-close-1-back",
+    ]
+    assert remaining is None
+    assert closed is not None and closed.exit is not None and closed.front_closed is not None
+    assert closed.front_closed.net_price == 1.10
+    assert closed.exit.net_price == pytest.approx(3.20 - 1.10)
+    assert repository.open_positions() == ()
+    assert broker.held_contracts() == {}
+
+
+def test_a_close_refused_after_it_was_accepted_also_legs_out() -> None:
+    execution, broker, _ = service(reject_calendar_closes=True, reject_late=True)
+
+    closed, remaining = close_trade(execution)
+
+    assert legs_sent(broker) == [None, SpreadLeg.FRONT, SpreadLeg.BACK]
+    assert broker.replaced == []  # a refused order is never re-priced
+    assert remaining is None and closed is not None and not closed.is_open
+
+
+def test_a_legged_exit_records_both_legs_market_at_their_fills() -> None:
+    execution, _, _ = service(reject_calendar_closes=True)
+
+    closed, _ = close_trade(execution)
+
+    assert closed is not None and closed.exit is not None
+    assert closed.exit.front is not None and closed.exit.front.ask == 1.20
+    assert closed.exit.back is not None and closed.exit.back.bid == 3.00
+
+
+def test_when_the_back_does_not_sell_the_position_is_long_back_only() -> None:
+    execution, broker, repository = service(
+        reject_calendar_closes=True, unfilled_legs=frozenset({SpreadLeg.BACK})
+    )
+    holding_the_calendar(broker)
+
+    closed, remaining = close_trade(execution)
+
+    assert closed is None
+    assert remaining is not None and remaining.long_back_only
+    assert repository.open_positions() == (remaining,)
+    assert broker.held_contracts() == {BACK: 3}  # the short front is covered
+    assert broker.cancelled  # the back order's walk ran out
+
+
+def test_a_long_back_only_position_only_sells_the_back() -> None:
+    execution, broker, repository = service()
+    back_only = OPENED.close_front(Fill(1.10, 3, START))
+
+    closed, remaining = execution.close(
+        back_only, f"{CID}-close-2", START + timedelta(minutes=10), at_natural=False
+    )
+
+    assert legs_sent(broker) == [SpreadLeg.BACK]
+    assert remaining is None
+    assert closed is not None and closed.exit is not None
+    assert closed.exit.net_price == pytest.approx(3.20 - 1.10)
+    assert repository.open_positions() == ()
+
+
+def test_selling_the_back_needs_no_quote_for_the_expired_front() -> None:
+    execution, _, _ = service()
+    del execution.market_data.leg_quotes[FRONT]  # type: ignore[attr-defined]
+    back_only = OPENED.close_front(Fill(1.10, 3, START))
+
+    closed, _ = execution.close(
+        back_only, f"{CID}-close-2", START + timedelta(minutes=10), at_natural=False
+    )
+
+    assert closed is not None and not closed.is_open
+
+
+def test_when_the_front_is_not_bought_back_the_back_is_left_alone() -> None:
+    execution, broker, _ = service(
+        reject_calendar_closes=True, unfilled_legs=frozenset({SpreadLeg.FRONT})
+    )
+
+    closed, remaining = close_trade(execution)
+
+    assert legs_sent(broker) == [None, SpreadLeg.FRONT]
+    assert closed is None
+    assert remaining == OPENED
+
+
+def test_a_partly_bought_back_front_splits_off_the_rest_as_a_calendar() -> None:
+    execution, _, repository = service(reject_calendar_closes=True, partial_fill=1)
+
+    closed, remaining = close_trade(execution)
+
+    assert closed is not None and closed.entry.quantity == 1 and not closed.is_open
+    assert remaining is not None and remaining.entry.quantity == 2
+    assert not remaining.long_back_only
+    assert repository.open_positions() == (remaining,)
+
+
+def test_legs_at_natural_buy_at_the_ask_and_sell_at_the_bid() -> None:
+    execution, broker, _ = service(reject_calendar_closes=True)
+
+    closed, _ = close_trade(execution, at_natural=True)
+
+    assert [t.limit_price for t in broker.submitted[1:]] == [1.20, 3.00]
+    assert closed is not None and closed.exit is not None
+    assert closed.exit.net_price == pytest.approx(3.00 - 1.20)

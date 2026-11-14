@@ -1,9 +1,10 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import pytest
 
 from evbot.domain.options import OptionContract, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket
+from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 
 SPREAD = CalendarSpread(
@@ -84,3 +85,8 @@ def test_rejects_a_naive_submission_time() -> None:
             OrderStatus.WORKING,
             SUBMITTED.replace(tzinfo=None),
         )
+
+
+def test_an_order_is_for_the_whole_calendar_unless_it_names_a_leg() -> None:
+    assert ticket().leg is None
+    assert replace(ticket(), leg=SpreadLeg.FRONT).leg is SpreadLeg.FRONT

@@ -6,7 +6,7 @@ from typing import Any
 from evbot.adapters.alpaca_market_data import occ_symbol
 from evbot.adapters.http_client import HttpRequestError, JsonSender
 from evbot.domain.options import OptionContract, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket
+from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.ports.clock import Clock
 from evbot.ports.errors import BrokerError
@@ -31,11 +31,13 @@ CLOSE_INTENTS = {Side.SELL: "buy_to_close", Side.BUY: "sell_to_close"}
 
 
 class AlpacaBroker:
-    """Alpaca multi-leg (mleg) option orders, on the paper account only.
+    """Alpaca option orders on the paper account only: multi-leg (mleg) orders for a whole
+    calendar, single-leg orders for one leg of it.
 
-    Our prices are always positive; Alpaca wants a positive limit for a debit and a
-    negative one for a credit, so the sign is added and removed here. Orders are sent once
-    and never retried automatically: recovery goes through the client order id.
+    Our prices are always positive. An mleg limit is positive for a debit and negative for a
+    credit, so the sign is added and removed here; a single-leg limit is always positive.
+    Orders are sent once and never retried automatically: recovery goes through the client
+    order id.
     """
 
     def __init__(
@@ -56,7 +58,6 @@ class AlpacaBroker:
         self._clock = clock
         self._url = PAPER_URL
         self._headers = {"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret_key}
-        self._intents: dict[str, OrderIntent] = {}
 
     def account_equity(self) -> float:
         return float(self._get("/v2/account")["equity"])
@@ -68,28 +69,9 @@ class AlpacaBroker:
         quantity: int,
         limit_price: float,
         client_order_id: str,
+        leg: SpreadLeg | None = None,
     ) -> OrderTicket:
-        intents = OPEN_INTENTS if intent is OrderIntent.OPEN else CLOSE_INTENTS
-        legs = []
-        for leg in (spread.front, spread.back):
-            side = leg.side if intent is OrderIntent.OPEN else _opposite(leg.side)
-            legs.append(
-                {
-                    "symbol": occ_symbol(leg.contract),
-                    "ratio_qty": "1",
-                    "side": side.value,
-                    "position_intent": intents[leg.side],
-                }
-            )
-        body = {
-            "order_class": "mleg",
-            "qty": str(quantity),
-            "type": "limit",
-            "limit_price": _signed(limit_price, intent),
-            "time_in_force": "day",
-            "client_order_id": client_order_id,
-            "legs": legs,
-        }
+        body = order_body(spread, intent, quantity, limit_price, client_order_id, leg)
         try:
             order = self._http.send("POST", f"{self._url}/v2/orders", body, self._headers)
         except HttpRequestError as error:
@@ -105,14 +87,15 @@ class AlpacaBroker:
                     limit_price,
                     OrderStatus.REJECTED,
                     self._clock.now(),
+                    leg=leg,
                 )
             raise BrokerError(f"{client_order_id}: {error}") from error
-        return self._ticket(order)
+        return self._ticket(order, spread)
 
-    def order(self, order_id: str) -> OrderTicket:
-        return self._ticket(self._get(f"/v2/orders/{order_id}"))
+    def order(self, ticket: OrderTicket) -> OrderTicket:
+        return self._ticket(self._get(f"/v2/orders/{ticket.order_id}"), ticket.spread)
 
-    def find_order(self, client_order_id: str) -> OrderTicket | None:
+    def find_order(self, client_order_id: str, spread: CalendarSpread) -> OrderTicket | None:
         try:
             order = self._http.get(
                 f"{self._url}/v2/orders:by_client_order_id",
@@ -123,18 +106,20 @@ class AlpacaBroker:
             if error.status == 404:
                 return None
             raise BrokerError(f"{client_order_id}: {error}") from error
-        return self._ticket(order)
+        return self._ticket(order, spread)
 
-    def replace(self, order_id: str, limit_price: float) -> OrderTicket:
-        intent = self._intents.get(order_id) or self.order(order_id).intent
-        body = {"limit_price": _signed(limit_price, intent)}
+    def replace(self, ticket: OrderTicket, limit_price: float) -> OrderTicket:
+        price = f"{limit_price:.2f}" if ticket.leg else _signed(limit_price, ticket.intent)
         try:
             order = self._http.send(
-                "PATCH", f"{self._url}/v2/orders/{order_id}", body, self._headers
+                "PATCH",
+                f"{self._url}/v2/orders/{ticket.order_id}",
+                {"limit_price": price},
+                self._headers,
             )
         except HttpRequestError as error:
-            raise BrokerError(f"replace {order_id}: {error}") from error
-        return self._ticket(order)
+            raise BrokerError(f"replace {ticket.order_id}: {error}") from error
+        return self._ticket(order, ticket.spread)
 
     def cancel(self, order_id: str) -> None:
         try:
@@ -161,14 +146,19 @@ class AlpacaBroker:
         except HttpRequestError as error:
             raise BrokerError(str(error)) from error
 
-    def _ticket(self, order: Any) -> OrderTicket:
+    def _ticket(self, order: Any, spread: CalendarSpread) -> OrderTicket:
         try:
-            legs = [(_contract(leg["symbol"]), leg) for leg in order["legs"]]
-            # The earlier expiry is the front leg, whatever order Alpaca lists them in.
-            (front, front_row), (back, _) = sorted(legs, key=lambda pair: pair[0].expiry)
+            leg: SpreadLeg | None = None
+            if order.get("legs"):
+                legs = [(_contract(row["symbol"]), row) for row in order["legs"]]
+                # The earlier expiry is the front leg, whatever order Alpaca lists them in.
+                (front, intent_row), (back, _) = sorted(legs, key=lambda pair: pair[0].expiry)
+                spread = CalendarSpread(Leg(front, Side.SELL), Leg(back, Side.BUY))
+            else:
+                leg, intent_row = _which_leg(_contract(order["symbol"]), spread), order
             intent = (
                 OrderIntent.OPEN
-                if front_row["position_intent"].endswith("open")
+                if intent_row["position_intent"].endswith("open")
                 else OrderIntent.CLOSE
             )
             quantity = int(float(order["qty"]))
@@ -182,7 +172,7 @@ class AlpacaBroker:
             ticket = OrderTicket(
                 order["id"],
                 order["client_order_id"],
-                CalendarSpread(Leg(front, Side.SELL), Leg(back, Side.BUY)),
+                spread,
                 intent,
                 quantity,
                 limit,
@@ -190,11 +180,66 @@ class AlpacaBroker:
                 datetime.fromisoformat(order["submitted_at"]),
                 filled,
                 fill_price if fill_price is not None or not filled else limit,
+                leg,
             )
         except (KeyError, TypeError, ValueError, IndexError) as error:
             raise BrokerError(f"unexpected Alpaca order format: {error!r}") from error
-        self._intents[ticket.order_id] = intent
         return ticket
+
+
+def order_body(
+    spread: CalendarSpread,
+    intent: OrderIntent,
+    quantity: int,
+    limit_price: float,
+    client_order_id: str,
+    leg: SpreadLeg | None = None,
+) -> dict[str, Any]:
+    """What is POSTed to /v2/orders: the whole calendar as one mleg order, or one leg."""
+    intents = OPEN_INTENTS if intent is OrderIntent.OPEN else CLOSE_INTENTS
+    if leg is not None:
+        traded = spread.front if leg is SpreadLeg.FRONT else spread.back
+        return {
+            "symbol": occ_symbol(traded.contract),
+            "qty": str(quantity),
+            "side": _side(traded.side, intent).value,
+            "type": "limit",
+            "limit_price": f"{limit_price:.2f}",
+            "time_in_force": "day",
+            "position_intent": intents[traded.side],
+            "client_order_id": client_order_id,
+        }
+    legs = [
+        {
+            "symbol": occ_symbol(each.contract),
+            "ratio_qty": "1",
+            "side": _side(each.side, intent).value,
+            "position_intent": intents[each.side],
+        }
+        for each in (spread.front, spread.back)
+    ]
+    return {
+        "order_class": "mleg",
+        "qty": str(quantity),
+        "type": "limit",
+        "limit_price": _signed(limit_price, intent),
+        "time_in_force": "day",
+        "client_order_id": client_order_id,
+        "legs": legs,
+    }
+
+
+def _which_leg(contract: OptionContract, spread: CalendarSpread) -> SpreadLeg:
+    if contract == spread.front.contract:
+        return SpreadLeg.FRONT
+    if contract == spread.back.contract:
+        return SpreadLeg.BACK
+    raise ValueError(f"{contract} is not a leg of the {spread.underlying} calendar")
+
+
+def _side(leg_side: Side, intent: OrderIntent) -> Side:
+    """This leg's order side: as in the calendar to open it, the opposite to close it."""
+    return leg_side if intent is OrderIntent.OPEN else _opposite(leg_side)
 
 
 def _signed(price: float, intent: OrderIntent) -> str:

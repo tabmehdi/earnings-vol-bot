@@ -119,3 +119,59 @@ def test_an_exit_failure_is_marked_and_still_open() -> None:
 
 def test_symbol_is_the_spreads_underlying() -> None:
     assert open_position().symbol == "AAPL"
+
+
+# Closing leg by leg
+
+FRONT_BOUGHT = Fill(0.90, 3, CLOSED, front=FRONT_AT_FILL)
+
+
+def test_buying_back_the_front_leaves_a_long_back_only_position() -> None:
+    back_only = open_position().close_front(FRONT_BOUGHT)
+
+    assert back_only.long_back_only
+    assert back_only.is_open
+    assert back_only.front_closed == FRONT_BOUGHT
+
+
+def test_a_calendar_position_is_not_long_back_only() -> None:
+    assert not open_position().long_back_only
+
+
+def test_a_closed_position_is_not_long_back_only() -> None:
+    closed = open_position().close_front(FRONT_BOUGHT).close(Fill(1.50, 3, CLOSED))
+
+    assert not closed.long_back_only
+    assert not closed.is_open
+
+
+def test_the_front_can_only_be_bought_back_once() -> None:
+    with pytest.raises(ValueError):
+        open_position().close_front(FRONT_BOUGHT).close_front(FRONT_BOUGHT)
+
+
+def test_the_front_buy_back_must_cover_the_whole_position() -> None:
+    with pytest.raises(ValueError):
+        open_position(quantity=3).close_front(Fill(0.90, 2, CLOSED))
+
+
+def test_a_legged_exit_can_cost_more_than_it_brings_in() -> None:
+    # Front bought back at 2.40, back sold at 2.10: net exit -0.30; (-0.30 - 2.00) * 3 * 100
+    closed = open_position().close(Fill(-0.30, 3, CLOSED))
+
+    assert closed.pnl() == pytest.approx(-690.0)
+
+
+def test_an_entry_price_cannot_be_negative() -> None:
+    with pytest.raises(ValueError):
+        Position(SPREAD, Fill(-0.10, 3, OPENED))
+
+
+def test_split_divides_a_front_buy_back_too() -> None:
+    back_only = replace(open_position(quantity=3), position_id="p-1").close_front(FRONT_BOUGHT)
+
+    part, rest = back_only.split(1)
+
+    assert part.front_closed is not None and part.front_closed.quantity == 1
+    assert rest.front_closed is not None and rest.front_closed.quantity == 2
+    assert part.front_closed.net_price == rest.front_closed.net_price == 0.90

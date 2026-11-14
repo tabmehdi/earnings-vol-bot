@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionContract, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket
+from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import (
     FilterResult,
@@ -292,6 +292,7 @@ def _order_fields(ticket: OrderTicket) -> dict[str, Any]:
         "submitted_at": ticket.submitted_at.isoformat(),
         "filled_quantity": ticket.filled_quantity,
         "fill_price": ticket.fill_price,
+        "leg": None if ticket.leg is None else ticket.leg.value,
     }
 
 
@@ -307,6 +308,7 @@ def _order(fields: dict[str, Any]) -> OrderTicket:
         datetime.fromisoformat(fields["submitted_at"]),
         fields["filled_quantity"],
         fields["fill_price"],
+        None if fields.get("leg") is None else SpreadLeg(fields["leg"]),
     )
 
 
@@ -343,6 +345,7 @@ def _position_fields(position: Position) -> dict[str, Any]:
         "exit": _fill_fields(position.exit),
         "exit_at": _time_text(position.exit_at),
         "exit_failed": position.exit_failed,
+        "front_closed": _fill_fields(position.front_closed),
     }
 
 
@@ -356,4 +359,5 @@ def _position(fields: dict[str, Any]) -> Position:
         fields["position_id"],
         _time(fields["exit_at"]),
         fields["exit_failed"],
+        _fill(fields.get("front_closed")),  # absent in files written before legged exits
     )

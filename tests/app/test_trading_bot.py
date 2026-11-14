@@ -12,7 +12,7 @@ from evbot.app.trade_scheduler import TradeScheduler
 from evbot.app.trading_bot import SessionSettings, TradingBot
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionContract, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket
+from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
 from evbot.domain.scans import ScanKind
 from evbot.domain.snapshots import ChainSnapshot, DataFeeds
 from evbot.domain.spreads import CalendarSpread, Leg, Side
@@ -370,6 +370,56 @@ def test_an_exit_that_fills_on_a_retry_closes_the_position() -> None:
     assert [t.submitted_at for t in closes(h)] == [at(THU, 9, 45), at(THU, 10), at(THU, 10, 15)]
 
 
+def test_a_refused_calendar_exit_is_closed_leg_by_leg() -> None:
+    h = due_position_harness(reject_calendar_closes=True)
+
+    h.bot.run_session()
+
+    assert [t.leg for t in closes(h)] == [None, SpreadLeg.FRONT, SpreadLeg.BACK]
+    assert h.repository.open_positions() == ()
+
+
+def test_a_front_not_bought_back_by_the_last_attempt_is_exit_failed() -> None:
+    h = due_position_harness(
+        front_expiry=SAME_DAY,
+        reject_calendar_closes=True,
+        unfilled_legs=frozenset({SpreadLeg.FRONT}),
+    )
+
+    h.bot.run_session()
+
+    (failed,) = h.repository.open_positions()
+    assert failed.exit_failed and not failed.long_back_only
+
+
+def test_a_long_back_only_position_keeps_retrying_past_the_front_expiry_deadline() -> None:
+    h = due_position_harness(
+        front_expiry=SAME_DAY,
+        reject_calendar_closes=True,
+        unfilled_legs=frozenset({SpreadLeg.BACK}),
+    )
+
+    h.bot.run_session()
+
+    (back_only,) = h.repository.open_positions()
+    assert back_only.long_back_only
+    assert not back_only.exit_failed  # no short leg left: no assignment risk
+    back_sales = [t for t in closes(h) if t.leg is SpreadLeg.BACK]
+    assert len({t.client_order_id for t in back_sales}) > 1  # retried in later windows
+    assert all(t.leg is not SpreadLeg.FRONT for t in closes(h)[2:])  # front bought once
+
+
+def test_a_long_back_only_position_sells_the_back_in_the_next_session() -> None:
+    repository = InMemoryTradeRepository()
+    repository.save_position(held_position().close_front(Fill(1.00, 1, at(THU, 9, 45))))
+    h = harness(events=(), repository=repository)
+
+    h.bot.run_session()
+
+    assert [t.leg for t in closes(h)] == [SpreadLeg.BACK]
+    assert h.repository.open_positions() == ()
+
+
 # Reconciliation
 
 
@@ -386,6 +436,20 @@ def test_a_working_order_left_by_a_crash_is_cancelled(caplog: pytest.LogCaptureF
 
     assert h.broker.orders[orphan.order_id].status is OrderStatus.CANCELLED
     assert "AAPL-2026-11-19-open" in caplog.text
+
+
+def test_a_long_back_only_position_expects_only_its_back_leg(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = InMemoryTradeRepository()
+    back_only = held_position().close_front(Fill(1.00, 1, at(THU, 9, 45)))
+    repository.save_position(back_only)
+    h = harness(events=(), repository=repository, unfilled_legs=frozenset({SpreadLeg.BACK}))
+    h.broker.held[back_only.spread.back.contract] = 1
+
+    h.bot.run_session()
+
+    assert "mismatch" not in caplog.text
 
 
 def test_holdings_that_do_not_match_positions_are_logged(caplog: pytest.LogCaptureFixture) -> None:

@@ -136,7 +136,9 @@ class TradingBot:
                 closed.entry.quantity,
                 closed.exit.net_price,
             )
-        if remaining is not None and final:
+        # Only after the last attempt at natural. The part left may be long back only now,
+        # with a later deadline of its own.
+        if remaining is not None and final and now >= self._exit_deadline(remaining):
             self.repository.save_position(remaining.mark_exit_failed())
             logger.error(
                 "%s: exit_failed: %d still open after the last attempt at natural (%s)",
@@ -146,7 +148,10 @@ class TradingBot:
             )
 
     def _exit_deadline(self, position: Position) -> datetime:
-        expiry = position.spread.front.contract.expiry
+        """The last attempt is due on the short front's expiry day (assignment risk). With the
+        front bought back, only the back is left, and its own expiry sets the deadline."""
+        legs = position.spread
+        expiry = (legs.back if position.long_back_only else legs.front).contract.expiry
         try:
             closes = self.calendar.close_time(expiry)
         except TradingCalendarError:
@@ -262,7 +267,7 @@ class TradingBot:
             if ticket.is_done:
                 continue
             try:
-                current = self.broker.order(ticket.order_id)
+                current = self.broker.order(ticket)
                 if not current.is_done:
                     self.broker.cancel(ticket.order_id)
                     logger.warning(
@@ -276,7 +281,8 @@ class TradingBot:
         positions = self.repository.open_positions()
         expected: defaultdict[OptionContract, int] = defaultdict(int)
         for position in positions:
-            expected[position.spread.front.contract] -= position.entry.quantity
+            if not position.long_back_only:
+                expected[position.spread.front.contract] -= position.entry.quantity
             expected[position.spread.back.contract] += position.entry.quantity
             if position.exit_failed:
                 logger.error(

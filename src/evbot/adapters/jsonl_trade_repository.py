@@ -7,7 +7,13 @@ from zoneinfo import ZoneInfo
 
 from evbot.domain.events import EarningsEvent, ReportTiming
 from evbot.domain.options import OptionContract, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
+from evbot.domain.orders import (
+    OrderIntent,
+    OrderPricing,
+    OrderStatus,
+    OrderTicket,
+    SpreadLeg,
+)
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import (
     FilterResult,
@@ -293,7 +299,35 @@ def _order_fields(ticket: OrderTicket) -> dict[str, Any]:
         "filled_quantity": ticket.filled_quantity,
         "fill_price": ticket.fill_price,
         "leg": None if ticket.leg is None else ticket.leg.value,
+        "priced_from": _pricing_fields(ticket.priced_from),
+        "broker_filled_at": _time_text(ticket.broker_filled_at),
     }
+
+
+def _pricing_fields(pricing: OrderPricing | None) -> dict[str, Any] | None:
+    if pricing is None:
+        return None
+    return {
+        "attempt": pricing.attempt,
+        "limit": pricing.limit,
+        "held": pricing.held,
+        "fetched_at": pricing.fetched_at.isoformat(),
+        "front": _leg_fields(pricing.front),
+        "back": _leg_fields(pricing.back),
+    }
+
+
+def _pricing(fields: dict[str, Any] | None) -> OrderPricing | None:
+    if fields is None:
+        return None
+    return OrderPricing(
+        fields["attempt"],
+        fields["limit"],
+        fields["held"],
+        datetime.fromisoformat(fields["fetched_at"]),
+        _leg_prices(fields["front"]),
+        _leg_prices(fields["back"]),
+    )
 
 
 def _order(fields: dict[str, Any]) -> OrderTicket:
@@ -309,6 +343,9 @@ def _order(fields: dict[str, Any]) -> OrderTicket:
         fields["filled_quantity"],
         fields["fill_price"],
         None if fields.get("leg") is None else SpreadLeg(fields["leg"]),
+        # Both absent in records written before per-attempt pricing.
+        _pricing(fields.get("priced_from")),
+        _time(fields.get("broker_filled_at")),
     )
 
 

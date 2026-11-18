@@ -13,6 +13,7 @@ from evbot.ports.errors import BrokerError
 
 PAPER_URL = "https://paper-api.alpaca.markets"
 OCC = re.compile(r"^(?P<root>[A-Z][A-Z0-9.]*?)(?P<day>\d{6})(?P<right>[CP])(?P<strike>\d{8})$")
+MAX_REPLACEMENTS = 50  # a walk replaces a few times; this only stops a broken chain
 REFUSED = frozenset({403, 422})  # Alpaca's answer when it will not take an order
 STATUS = {
     "partially_filled": OrderStatus.PARTIALLY_FILLED,
@@ -106,15 +107,24 @@ class AlpacaBroker:
             if error.status == 404:
                 return None
             raise BrokerError(f"{client_order_id}: {error}") from error
-        return self._ticket(order, spread)
+        chain = [order]
+        while chain[-1].get("replaced_by") and len(chain) <= MAX_REPLACEMENTS:
+            chain.append(self._get(f"/v2/orders/{chain[-1]['replaced_by']}"))
+        newest = chain[-1]
+        if newest.get("status") == "rejected" and not _filled_quantity(newest):
+            # A replacement is refused when the order it replaces filled first: keep that fill.
+            filled = [o for o in chain if _filled_quantity(o)]
+            if filled:
+                newest = filled[-1]
+        return self._ticket(newest, spread)
 
-    def replace(self, ticket: OrderTicket, limit_price: float) -> OrderTicket:
+    def replace(self, ticket: OrderTicket, limit_price: float, client_order_id: str) -> OrderTicket:
         price = f"{limit_price:.2f}" if ticket.leg else _signed(limit_price, ticket.intent)
         try:
             order = self._http.send(
                 "PATCH",
                 f"{self._url}/v2/orders/{ticket.order_id}",
-                {"limit_price": price},
+                {"limit_price": price, "client_order_id": client_order_id},
                 self._headers,
             )
         except HttpRequestError as error:
@@ -181,6 +191,7 @@ class AlpacaBroker:
                 filled,
                 fill_price if fill_price is not None or not filled else limit,
                 leg,
+                broker_filled_at=_time(order.get("filled_at")),
             )
         except (KeyError, TypeError, ValueError, IndexError) as error:
             raise BrokerError(f"unexpected Alpaca order format: {error!r}") from error
@@ -227,6 +238,14 @@ def order_body(
         "client_order_id": client_order_id,
         "legs": legs,
     }
+
+
+def _filled_quantity(order: Any) -> int:
+    return int(float(order.get("filled_qty") or 0))
+
+
+def _time(text: str | None) -> datetime | None:
+    return None if not text else datetime.fromisoformat(text)
 
 
 def _which_leg(contract: OptionContract, spread: CalendarSpread) -> SpreadLeg:

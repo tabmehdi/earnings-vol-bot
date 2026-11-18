@@ -35,11 +35,15 @@ class Broker(Protocol):
         ...
 
     def find_order(self, client_order_id: str, spread: CalendarSpread) -> OrderTicket | None:
-        """Our order by its client id, so a restarted session resumes instead of duplicating."""
+        """Our order by the client id it was submitted with, followed through its replacements
+        to the newest one, so a restarted session resumes instead of duplicating. If the newest
+        replacement was refused because an earlier order filled first, that fill is returned."""
         ...
 
-    def replace(self, ticket: OrderTicket, limit_price: float) -> OrderTicket:
-        """A new limit for a working order; the returned ticket may carry a new order_id."""
+    def replace(self, ticket: OrderTicket, limit_price: float, client_order_id: str) -> OrderTicket:
+        """A new limit for a working order, under a new client id of ours. The returned ticket
+        carries the replacement's order_id; it comes back REJECTED if the old order filled
+        before the replacement landed."""
         ...
 
     def cancel(self, order_id: str) -> None: ...

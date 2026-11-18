@@ -5,7 +5,7 @@ from pathlib import Path
 
 from evbot.adapters.jsonl_trade_repository import JsonlTradeRepository
 from evbot.domain.options import OptionContract, OptionRight
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
+from evbot.domain.orders import OrderIntent, OrderPricing, OrderStatus, OrderTicket, SpreadLeg
 from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.domain.trades import Fill, Position
@@ -137,3 +137,35 @@ def test_positions_and_orders_saved_before_legged_exits_still_load(tmp_path: Pat
     saved.write_text(json.dumps(fields), encoding="utf-8")
 
     assert repo.open_positions() == (POSITION,)
+
+
+def test_an_order_keeps_the_quotes_its_limit_came_from_and_the_fill_time(
+    tmp_path: Path,
+) -> None:
+    repo = repository(tmp_path)
+    pricing = OrderPricing(
+        attempt=2,
+        limit=2.13,
+        held=True,
+        fetched_at=OPENED,
+        front=LegPrices(1.00, 1.20, 1.10, None, OPENED - timedelta(seconds=1)),
+        back=LegPrices(2.70, 3.10, 2.90, None, OPENED - timedelta(seconds=1)),
+    )
+    filled = OrderTicket(
+        "o-3",
+        "AAPL-2026-11-20-open-r1",
+        SPREAD,
+        OrderIntent.OPEN,
+        3,
+        2.13,
+        OrderStatus.FILLED,
+        OPENED,
+        3,
+        2.12,
+        priced_from=pricing,
+        broker_filled_at=OPENED + timedelta(seconds=4),
+    )
+
+    repo.save_order(filled)
+
+    assert repo.orders_on(date(2026, 11, 19)) == (filled,)

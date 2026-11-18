@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread
 
 
@@ -27,6 +28,24 @@ DONE = frozenset({OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTE
 
 
 @dataclass(frozen=True, slots=True)
+class OrderPricing:
+    """What one attempt's limit was computed from, so a missed fill can be explained later.
+
+    attempt is the walk step (None for the single natural-price attempt). held means the walk
+    kept the previous limit because these quotes would have moved it backwards. fetched_at is
+    our clock when the quotes arrived; each leg's quoted_at is the broker's quote time. A leg
+    order only has its own leg's prices.
+    """
+
+    attempt: int | None
+    limit: float
+    held: bool
+    fetched_at: datetime
+    front: LegPrices | None
+    back: LegPrices | None
+
+
+@dataclass(frozen=True, slots=True)
 class OrderTicket:
     """One broker order: the whole calendar, or one of its legs when leg is set (a legged exit).
 
@@ -46,6 +65,8 @@ class OrderTicket:
     filled_quantity: int = 0
     fill_price: float | None = None
     leg: SpreadLeg | None = None
+    priced_from: OrderPricing | None = None  # set by us, never by the broker
+    broker_filled_at: datetime | None = None  # the broker's own fill time
 
     def __post_init__(self) -> None:
         if self.submitted_at.utcoffset() is None:

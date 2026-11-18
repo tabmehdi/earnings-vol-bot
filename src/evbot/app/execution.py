@@ -1,10 +1,17 @@
 import logging
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from evbot.domain.options import OptionContract, OptionQuote
-from evbot.domain.orders import OrderIntent, OrderStatus, OrderTicket, SpreadLeg
+from evbot.domain.orders import (
+    OrderIntent,
+    OrderPricing,
+    OrderStatus,
+    OrderTicket,
+    SpreadLeg,
+)
 from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.domain.trades import Fill, Position
@@ -30,6 +37,11 @@ class _Outcome:
 class ExecutionService:
     """Works one order at a time: fresh quotes, a limit from the pricing policy, re-priced
     every step until filled, out of steps or past the deadline, then cancelled.
+
+    The walk only moves toward the market: an opening limit never drops below the one
+    already sent and a closing limit never rises above it, whatever the next quotes say
+    (they are noisy). Replacements get client ids <base>-r1, -r2..., and a restart finds
+    the live order through the broker's replacement chain and carries on the walk.
 
     A close goes out as one calendar (mleg) order. If the broker refuses it, the calendar is
     closed leg by leg: first the short front is bought back (that removes the assignment
@@ -176,9 +188,25 @@ class ExecutionService:
         if ticket is not None and ticket.is_done:
             # This order already ran (e.g. before a restart); never send it twice.
             return _Outcome(ticket, None)
+        replacements = 0
+        first_attempt = 0
+        if ticket is not None:
+            # A restart mid-walk: carry on from the live order, never send a new one.
+            replacements = _replacement_number(ticket.client_order_id, client_order_id)
+            first_attempt = replacements + 1
+            logger.info(
+                "%s: resuming the working order %s at %.2f",
+                client_order_id,
+                ticket.client_order_id,
+                ticket.limit_price,
+            )
         contracts = _traded(spread, leg)
         quotes: Quotes | None = None
-        for attempt in range(1 if at_natural else self.pricing.steps):
+        replaced: OrderTicket | None = None  # the order the live one replaced
+        attempts: list[int | None] = (
+            [None] if at_natural else list(range(first_attempt, self.pricing.steps))
+        )
+        for attempt in attempts:
             if self.clock.now() >= deadline:
                 logger.info("%s: deadline %s reached", client_order_id, deadline)
                 break
@@ -188,21 +216,52 @@ class ExecutionService:
                 logger.warning("%s: no leg quotes (%s); skipping a step", client_order_id, error)
                 self._pause(deadline)
                 continue
-            price = self._price(spread, intent, leg, attempt, at_natural, quotes)
+            fetched_at = self.clock.now()
+            walked = self._price(spread, intent, leg, attempt, quotes)
+            price = walked
+            if ticket is not None and attempt is not None:
+                previous = ticket.limit_price
+                opening = intent is OrderIntent.OPEN
+                price = max(previous, walked) if opening else min(previous, walked)
+            pricing = OrderPricing(
+                attempt,
+                price,
+                price != walked,
+                fetched_at,
+                _prices_of(quotes, spread.front.contract),
+                _prices_of(quotes, spread.back.contract),
+            )
             if ticket is None:
                 ticket = self.broker.submit(
                     spread, intent, quantity, price, client_order_id, leg=leg
                 )
+            elif price != ticket.limit_price:
+                replacements += 1
+                replaced = ticket
+                ticket = self.broker.replace(ticket, price, f"{client_order_id}-r{replacements}")
             else:
-                ticket = self.broker.replace(ticket, price)
+                logger.info(
+                    "%s: holding at %.2f (these quotes walk to %.2f)",
+                    client_order_id,
+                    price,
+                    walked,
+                )
+            ticket = replace(ticket, priced_from=pricing)
             self.repository.save_order(ticket)
             if ticket.status is OrderStatus.REJECTED:
+                earlier = self._earlier_fill(replaced)
+                if earlier is not None:
+                    return _Outcome(earlier, self._quotes_or(contracts, quotes))
                 logger.warning("%s: rejected at %.2f", client_order_id, price)
                 return _Outcome(ticket, None)
             self._pause(deadline)
             ticket = self._check(ticket)
             if ticket.status is OrderStatus.FILLED:
                 return _Outcome(ticket, self._quotes_or(contracts, quotes))
+            if ticket.status is OrderStatus.REJECTED:
+                earlier = self._earlier_fill(replaced)
+                if earlier is not None:
+                    return _Outcome(earlier, self._quotes_or(contracts, quotes))
             if ticket.is_done:
                 # Refused after it was accepted, or cancelled outside the bot: never re-price.
                 logger.warning("%s: order ended as %s", client_order_id, ticket.status.value)
@@ -224,25 +283,41 @@ class ExecutionService:
         spread: CalendarSpread,
         intent: OrderIntent,
         leg: SpreadLeg | None,
-        attempt: int,
-        at_natural: bool,
+        attempt: int | None,
         quotes: Quotes,
     ) -> float:
+        """This attempt's limit from these quotes alone; attempt None is the natural price."""
         if leg is None:
             front, back = quotes[spread.front.contract], quotes[spread.back.contract]
-            if at_natural:
+            if attempt is None:
                 return self.pricing.natural(intent, front, back)
             return self.pricing.limit(intent, attempt, front, back)
         traded = _leg(spread, leg)
         side = traded.side if intent is OrderIntent.OPEN else _opposite(traded.side)
         quote = quotes[traded.contract]
-        if at_natural:
+        if attempt is None:
             return self.pricing.leg_natural(side, quote)
         return self.pricing.leg_limit(side, attempt, quote)
 
+    def _earlier_fill(self, replaced: OrderTicket | None) -> OrderTicket | None:
+        """A replacement is refused when the order it replaces filled first, either at once or
+        a moment later. Then that fill is the outcome, not a refusal (which would start a
+        leg-out of a position that is already closed)."""
+        if replaced is None:
+            return None
+        earlier = self._check(replaced)
+        if not earlier.filled_quantity:
+            return None
+        logger.info(
+            "%s filled before its replacement landed; using that fill", earlier.client_order_id
+        )
+        return earlier
+
     def _check(self, ticket: OrderTicket) -> OrderTicket:
-        current = self.broker.order(ticket)
-        if current != ticket:
+        """The order's state now, saved only when it changed. The broker's re-read can differ
+        in details such as submitted_at's microseconds, which are not a change."""
+        current = replace(self.broker.order(ticket), priced_from=ticket.priced_from)
+        if _state(current) != _state(ticket):
             self.repository.save_order(current)
         return current
 
@@ -270,7 +345,11 @@ class ExecutionService:
             front = _leg_prices(outcome.quotes[ticket.spread.front.contract])
             back = _leg_prices(outcome.quotes[ticket.spread.back.contract])
         return Fill(
-            ticket.fill_price, ticket.filled_quantity, self.clock.now(), front=front, back=back
+            ticket.fill_price,
+            ticket.filled_quantity,
+            ticket.broker_filled_at or self.clock.now(),
+            front=front,
+            back=back,
         )
 
     def _leg_fill(self, outcome: _Outcome, contract: OptionContract) -> Fill | None:
@@ -285,10 +364,35 @@ class ExecutionService:
         return Fill(
             ticket.fill_price,
             ticket.filled_quantity,
-            self.clock.now(),
+            ticket.broker_filled_at or self.clock.now(),
             front=market if is_front else None,
             back=None if is_front else market,
         )
+
+
+def _replacement_number(live_client_order_id: str, base: str) -> int:
+    """0 for the order submitted under base, N for its replacement base-rN."""
+    if live_client_order_id == base:
+        return 0
+    match = re.fullmatch(re.escape(base) + r"-r(\d+)", live_client_order_id)
+    if match is None:
+        raise ValueError(f"{live_client_order_id} is not an order of {base}")
+    return int(match[1])
+
+
+def _state(ticket: OrderTicket) -> tuple[object, ...]:
+    return (
+        ticket.order_id,
+        ticket.status,
+        ticket.filled_quantity,
+        ticket.fill_price,
+        ticket.limit_price,
+    )
+
+
+def _prices_of(quotes: Quotes, contract: OptionContract) -> LegPrices | None:
+    quote = quotes.get(contract)
+    return None if quote is None else _leg_prices(quote)
 
 
 def _traded(spread: CalendarSpread, leg: SpreadLeg | None) -> tuple[OptionContract, ...]:

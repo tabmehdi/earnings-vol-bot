@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -324,3 +326,193 @@ def test_legs_at_natural_buy_at_the_ask_and_sell_at_the_bid() -> None:
     assert [t.limit_price for t in broker.submitted[1:]] == [1.20, 3.00]
     assert closed is not None and closed.exit is not None
     assert closed.exit.net_price == pytest.approx(3.00 - 1.20)
+
+
+# A walk that only moves one way, deterministic replacements and crash recovery
+
+
+@dataclass
+class QuoteSequence:
+    """Serves one set of leg quotes per fetch, repeating the last one; a fetch number in
+    crash_on raises Crash, like the process dying mid-walk."""
+
+    sets: list[dict[OptionContract, OptionQuote]]
+    crash_on: int | None = None
+    fetches: int = 0
+
+    def get_leg_quotes(self, contracts: Any) -> dict[OptionContract, OptionQuote]:
+        self.fetches += 1
+        if self.fetches == self.crash_on:
+            raise Crash
+        found = self.sets[min(self.fetches, len(self.sets)) - 1]
+        return {c: found[c] for c in contracts}
+
+    def get_chain(self, symbol: str) -> Any:
+        raise NotImplementedError
+
+    def get_history(self, symbol: str, end: date, bars: int) -> Any:
+        raise NotImplementedError
+
+    def screen(self, symbols: Any) -> dict[str, str]:
+        return {}
+
+
+class Crash(Exception):
+    pass
+
+
+def back_at(bid: float, ask: float) -> dict[OptionContract, OptionQuote]:
+    return {**QUOTES, BACK: OptionQuote(BACK, bid, ask, None, 0, 0, quoted_at=START)}
+
+
+def sequenced(
+    market: QuoteSequence, **broker_options: object
+) -> tuple[ExecutionService, FakeBroker, InMemoryTradeRepository]:
+    clock = AdvancingClock(START)
+    broker = FakeBroker(clock, **broker_options)  # type: ignore[arg-type]
+    repository = InMemoryTradeRepository()
+    return ExecutionService(broker, market, POLICY, repository, clock), broker, repository
+
+
+def test_an_opening_walk_never_lowers_its_limit_when_the_quotes_dip() -> None:
+    # Attempt 2's back dips to 2.70/3.10: its own walk would ask 1.87, below the 2.13 sent.
+    normal, dip = dict(QUOTES), back_at(2.70, 3.10)
+    execution, broker, repository = sequenced(
+        QuoteSequence([normal, normal, dip, normal, normal]), fill_on_check=None
+    )
+
+    open_trade(execution)
+
+    assert [price for _, price in broker.replaced] == [2.13, 2.21, 2.25]
+    walked = [o.priced_from for o in repository.orders if o.priced_from is not None]
+    limits = [p.limit for p in walked]
+    assert limits == sorted(limits)
+    held = [p for p in walked if p.held]
+    assert [(p.attempt, p.limit) for p in held] == [(2, 2.13)]
+
+
+def test_a_closing_walk_never_raises_its_limit_when_the_quotes_jump() -> None:
+    # Attempt 2's back jumps to 3.30/3.70: its own walk would ask 2.25, above the 2.03 sent.
+    normal, jump = dict(QUOTES), back_at(3.30, 3.70)
+    execution, broker, _ = sequenced(
+        QuoteSequence([normal, normal, jump, normal, normal]), fill_on_check=None
+    )
+
+    close_trade(execution)
+
+    assert [price for _, price in broker.replaced] == [2.03, 1.88, 1.80]
+
+
+def test_replacements_get_numbered_client_order_ids() -> None:
+    execution, broker, _ = service(fill_on_check=None)
+
+    open_trade(execution)
+
+    assert broker.replace_ids == [f"{CID}-r1", f"{CID}-r2", f"{CID}-r3", f"{CID}-r4"]
+
+
+def test_a_restart_after_a_crash_mid_walk_resumes_the_live_order() -> None:
+    clock = AdvancingClock(START)
+    broker = FakeBroker(clock, fill_on_check=None)
+    repository = InMemoryTradeRepository()
+    crashing = QuoteSequence([dict(QUOTES)], crash_on=4)  # after the submit, -r1 and -r2
+    with pytest.raises(Crash):
+        ExecutionService(broker, crashing, POLICY, repository, clock).open(
+            SPREAD, 3, CID, START + timedelta(minutes=10), EXIT_AT
+        )
+    restarted = ExecutionService(
+        broker, FakeMarketData({}, {}, leg_quotes=dict(QUOTES)), POLICY, repository, clock
+    )
+
+    restarted.open(SPREAD, 3, CID, START + timedelta(minutes=10), EXIT_AT)
+
+    assert len(broker.submitted) == 1  # never a second order
+    assert broker.replace_ids == [f"{CID}-r1", f"{CID}-r2", f"{CID}-r3", f"{CID}-r4"]
+    assert [price for _, price in broker.replaced][2:] == [2.21, 2.25]
+
+
+def test_a_replacement_rejected_because_the_old_order_filled_counts_as_that_fill() -> None:
+    execution, broker, repository = service(fill_on_check=None, fills_during_replace=True)
+
+    closed, remaining = close_trade(execution)
+
+    assert remaining is None
+    assert closed is not None and closed.exit is not None
+    assert closed.exit.net_price == 2.10  # the first order's limit, which filled
+    assert legs_sent(broker) == [None]  # no leg-out
+    assert repository.open_positions() == ()
+
+
+def test_a_replacement_refused_on_a_later_check_because_the_old_order_filled_counts_too() -> None:
+    execution, broker, _ = service(
+        fill_on_check=None, fills_during_replace=True, race_seen_late=True
+    )
+
+    closed, remaining = close_trade(execution)
+
+    assert remaining is None
+    assert closed is not None and closed.exit is not None and closed.exit.net_price == 2.10
+    assert legs_sent(broker) == [None]  # no leg-out
+
+
+# What each order record says about its price
+
+
+def test_each_attempt_records_the_quotes_its_limit_came_from() -> None:
+    execution, _, repository = service(fill_on_check=None)
+
+    open_trade(execution)
+
+    # One record per attempt; later status records (the cancel) repeat the last attempt's.
+    attempts = list(dict.fromkeys(o.priced_from for o in repository.orders if o.priced_from))
+    assert [p.attempt for p in attempts] == [0, 1, 2, 3, 4]
+    assert repository.orders[-1].status is OrderStatus.CANCELLED
+    assert repository.orders[-1].priced_from == attempts[-1]
+    assert [p.limit for p in attempts] == [2.10, 2.13, 2.17, 2.21, 2.25]
+    first = attempts[0]
+    assert first.front is not None and (first.front.bid, first.front.ask) == (1.00, 1.20)
+    assert first.back is not None and first.back.mid == pytest.approx(3.20)
+    assert first.back.quoted_at == START
+    assert first.fetched_at == START
+    assert attempts[1].fetched_at == START + timedelta(seconds=20)
+
+
+def test_a_leg_order_records_only_its_own_leg() -> None:
+    execution, _, repository = service(reject_calendar_closes=True)
+
+    close_trade(execution)
+
+    front_order = next(o for o in repository.orders if o.leg is SpreadLeg.FRONT)
+    assert front_order.priced_from is not None
+    assert front_order.priced_from.front is not None and front_order.priced_from.back is None
+
+
+def test_the_natural_price_attempt_has_no_attempt_number() -> None:
+    execution, _, repository = service()
+
+    close_trade(execution, at_natural=True)
+
+    assert repository.orders[0].priced_from is not None
+    assert repository.orders[0].priced_from.attempt is None
+
+
+def test_a_fill_takes_the_brokers_fill_time() -> None:
+    reported = START + timedelta(seconds=3)
+    execution, _, _ = service(reported_fill_time=reported)
+
+    position = open_trade(execution)
+
+    assert position is not None and position.entry.filled_at == reported
+
+
+def test_an_order_is_recorded_once_until_its_state_changes() -> None:
+    # Alpaca's re-read differs only by microseconds in submitted_at: not a new record.
+    execution, _, repository = service(fill_on_check=2, shift_submitted_at_on_read=True)
+
+    open_trade(execution)
+
+    assert [o.status for o in repository.orders] == [
+        OrderStatus.WORKING,  # submit
+        OrderStatus.WORKING,  # -r1, a new order
+        OrderStatus.FILLED,
+    ]

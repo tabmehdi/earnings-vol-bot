@@ -25,6 +25,9 @@ def order_json(
     qty: str = "3",
     limit_price: str = "2.10",
     opening: bool = True,
+    filled_at: str | None = None,
+    replaced_by: str | None = None,
+    replaces: str | None = None,
 ) -> dict[str, Any]:
     front_intent, back_intent = (
         ("sell_to_open", "buy_to_open") if opening else ("buy_to_close", "sell_to_close")
@@ -39,6 +42,9 @@ def order_json(
         "filled_avg_price": filled_avg_price,
         "limit_price": limit_price,
         "submitted_at": "2026-11-19T20:45:00.123456789Z",
+        "filled_at": filled_at,
+        "replaced_by": replaced_by,
+        "replaces": replaces,
         "legs": [
             {
                 "symbol": BACK_OCC,
@@ -80,6 +86,9 @@ def leg_order_json(
         "filled_avg_price": filled_avg_price,
         "limit_price": limit_price,
         "submitted_at": "2026-11-19T20:45:00.123456789Z",
+        "filled_at": None,
+        "replaced_by": None,
+        "replaces": None,
         "legs": None,
     }
 
@@ -157,13 +166,18 @@ class AlpacaTradingServer:
             order["status"] = "canceled"
             return response(204)
         if method == "PATCH":
-            order["status"] = "replaced"
+            body = self.bodies[-1]
             new_id = f"a{len(self.orders) + 1}"
+            order["status"] = "replaced"
+            order["replaced_by"] = new_id
             new = {
                 **order,
                 "id": new_id,
+                "client_order_id": body.get("client_order_id", f"random-{new_id}"),
                 "status": "new",
-                "limit_price": self.bodies[-1]["limit_price"],
+                "limit_price": body["limit_price"],
+                "replaced_by": None,
+                "replaces": order_id,
             }
             self.orders[new_id] = new
             return response(200, new)

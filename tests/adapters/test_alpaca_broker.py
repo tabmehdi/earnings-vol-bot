@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import Any
 
 import pytest
 
@@ -179,9 +180,10 @@ def test_replace_sends_the_signed_price_and_returns_the_new_order() -> None:
     broker = server.broker()
     first = broker.submit(SPREAD, OrderIntent.CLOSE, 3, 2.10, f"{CID}-close")
 
-    second = broker.replace(first, 2.03)
+    second = broker.replace(first, 2.03, f"{CID}-close-r1")
 
-    assert server.bodies[-1] == {"limit_price": "-2.03"}
+    assert server.bodies[-1] == {"limit_price": "-2.03", "client_order_id": f"{CID}-close-r1"}
+    assert second.client_order_id == f"{CID}-close-r1"
     assert second.order_id != first.order_id
     assert second.limit_price == 2.03
 
@@ -264,10 +266,64 @@ def test_replacing_a_leg_order_sends_a_positive_price() -> None:
     broker = server.broker()
     first = broker.submit(SPREAD, OrderIntent.CLOSE, 3, 1.10, "c-front", leg=SpreadLeg.FRONT)
 
-    second = broker.replace(first, 1.15)
+    second = broker.replace(first, 1.15, "c-front-r1")
 
-    assert server.bodies[-1] == {"limit_price": "1.15"}
+    assert server.bodies[-1] == {"limit_price": "1.15", "client_order_id": "c-front-r1"}
     assert (second.leg, second.limit_price) == (SpreadLeg.FRONT, 1.15)
+
+
+def chain(*statuses: str, filled_first: bool = False) -> dict[str, dict[str, Any]]:
+    """Orders a1 -> a2 -> ... where each replaced the one before; client ids CID, CID-r1..."""
+    orders = {}
+    for number, status in enumerate(statuses, start=1):
+        order_id = f"a{number}"
+        cid = CID if number == 1 else f"{CID}-r{number - 1}"
+        fill = filled_first and number == 1
+        orders[order_id] = order_json(
+            order_id,
+            cid,
+            "filled" if fill else status,
+            filled_qty="3" if fill else "0",
+            filled_avg_price="2.10" if fill else None,
+            replaced_by=f"a{number + 1}" if number < len(statuses) else None,
+            replaces=f"a{number - 1}" if number > 1 else None,
+        )
+    return orders
+
+
+def test_find_order_follows_replacements_to_the_newest_order() -> None:
+    server = AlpacaTradingServer(orders=chain("replaced", "replaced", "new"))
+
+    ticket = server.broker().find_order(CID, SPREAD)
+
+    assert ticket is not None
+    assert (ticket.order_id, ticket.client_order_id) == ("a3", f"{CID}-r2")
+    assert ticket.status is OrderStatus.WORKING
+
+
+def test_find_order_returns_the_fill_when_its_replacement_was_refused() -> None:
+    # The first order filled before the replacement landed, so Alpaca rejected the replacement.
+    server = AlpacaTradingServer(orders=chain("filled", "rejected", filled_first=True))
+
+    ticket = server.broker().find_order(CID, SPREAD)
+
+    assert ticket is not None and ticket.order_id == "a1"
+    assert ticket.status is OrderStatus.FILLED
+
+
+def test_the_brokers_fill_time_is_kept() -> None:
+    filled = order_json(
+        "a9",
+        status="filled",
+        filled_qty="3",
+        filled_avg_price="2.05",
+        filled_at="2026-11-19T20:45:03.5Z",
+    )
+    server = AlpacaTradingServer(orders={"a9": filled})
+
+    ticket = server.broker().order(known("a9"))
+
+    assert ticket.broker_filled_at == datetime(2026, 11, 19, 20, 45, 3, 500000, tzinfo=UTC)
 
 
 def test_cancel_tolerates_an_order_that_already_filled() -> None:

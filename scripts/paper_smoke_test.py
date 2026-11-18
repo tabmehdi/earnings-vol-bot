@@ -69,6 +69,24 @@ def describe(ticket: OrderTicket) -> str:
     )
 
 
+def describe_pricing(ticket: OrderTicket) -> str:
+    pricing = ticket.priced_from
+    if pricing is None:
+        return f"{ticket.client_order_id}: no pricing record"
+    step = "natural" if pricing.attempt is None else f"attempt {pricing.attempt}"
+    legs = ", ".join(
+        f"{side} {m.bid:.2f}/{m.ask:.2f} mid {m.mid:.3f}"
+        + (f" quoted {m.quoted_at:%H:%M:%S}" if m.quoted_at else "")
+        for side, m in (("front", pricing.front), ("back", pricing.back))
+        if m is not None
+    )
+    held = " (held)" if pricing.held else ""
+    return (
+        f"{ticket.client_order_id} {step}: limit {pricing.limit:.2f}{held}, "
+        f"fetched {pricing.fetched_at:%H:%M:%S}: {legs}"
+    )
+
+
 def describe_fill(name: str, fill: Fill | None) -> str:
     if fill is None:
         return f"{name}: none"
@@ -114,9 +132,9 @@ class PrintingBroker:
     def find_order(self, client_order_id: str, spread: CalendarSpread) -> OrderTicket | None:
         return self.inner.find_order(client_order_id, spread)
 
-    def replace(self, ticket: OrderTicket, limit_price: float) -> OrderTicket:
-        show(f"replace {ticket.order_id} -> {limit_price:.2f}")
-        current = self.inner.replace(ticket, limit_price)
+    def replace(self, ticket: OrderTicket, limit_price: float, client_order_id: str) -> OrderTicket:
+        show(f"replace {ticket.order_id} -> {limit_price:.2f} ({client_order_id})")
+        current = self.inner.replace(ticket, limit_price, client_order_id)
         show(f"  -> {describe(current)}")
         return current
 
@@ -204,6 +222,12 @@ def main() -> int:
         repository = JsonlTradeRepository(RECORDS / "signals", RECORDS / "trades")
         execution = ExecutionService(broker, market, pricing, repository, CLOCK)
         result = round_trip(execution, broker, spread, tag)
+        show("== what each limit was computed from")
+        seen = set()
+        for ticket in repository.orders_on(today):
+            if ticket.client_order_id.startswith(tag) and ticket.priced_from not in seen:
+                seen.add(ticket.priced_from)
+                show(f"  {describe_pricing(ticket)}")
         show(f"{http.request_count} requests; records in {RECORDS}")
     return result
 

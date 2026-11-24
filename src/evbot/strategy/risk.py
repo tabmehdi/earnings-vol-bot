@@ -28,7 +28,11 @@ class RiskManager:
         contracts: int,
         open_positions: Sequence[Position],
         equity: float,
+        debit: float | None = None,
     ) -> RiskDecision:
+        """debit is what the order will pay per spread, the mid by default. It only sets the
+        capital committed: the spread cost is always measured against the mid, so a
+        natural-price order is not judged more leniently for paying more."""
         if contracts < 1:
             raise ValueError(f"approve needs at least one contract, got {contracts}")
         still_open = [p for p in open_positions if p.is_open]
@@ -36,20 +40,21 @@ class RiskManager:
             return RiskDecision(False, f"{spread.underlying} is already held")
         if len(still_open) >= self.max_open_positions:
             return RiskDecision(False, f"{len(still_open)} open positions already")
-        debit = back.mid - front.mid
-        if debit <= 0:
-            return RiskDecision(False, f"no debit to pay ({debit:.2f})")
+        mid = back.mid - front.mid
+        if mid <= 0:
+            return RiskDecision(False, f"no debit to pay ({mid:.2f})")
         # Half of each leg's bid-ask width, paid on the way in and again on the way out.
         round_trip = (front.ask - front.bid) + (back.ask - back.bid)
-        share = round_trip / debit
+        share = round_trip / mid
         if share > self.max_spread_cost_pct + TOLERANCE:
             return RiskDecision(
                 False,
                 f"round-trip spread cost {round_trip:.2f} is {share:.1%} of the "
-                f"{debit:.2f} debit, above {self.max_spread_cost_pct:.0%}",
+                f"{mid:.2f} debit, above {self.max_spread_cost_pct:.0%}",
             )
+        paid = mid if debit is None else debit
         multiplier = spread.front.contract.multiplier
-        committed = sum(p.cost for p in still_open) + debit * contracts * multiplier
+        committed = sum(p.cost for p in still_open) + paid * contracts * multiplier
         limit = self.max_committed_pct * equity
         if committed > limit + TOLERANCE:
             return RiskDecision(

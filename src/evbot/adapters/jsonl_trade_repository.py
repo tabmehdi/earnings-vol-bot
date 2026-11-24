@@ -31,6 +31,9 @@ NEW_YORK = ZoneInfo("America/New_York")
 LIQUIDITY = "liquidity"
 
 
+NATURAL = "natural"  # the attempt field of a natural-price order
+
+
 class JsonlTradeRepository:
     """One file per scan: a scan line, then one line per signal.
 
@@ -308,8 +311,9 @@ def _pricing_fields(pricing: OrderPricing | None) -> dict[str, Any] | None:
     if pricing is None:
         return None
     return {
-        "attempt": pricing.attempt,
+        "attempt": NATURAL if pricing.attempt is None else pricing.attempt,
         "limit": pricing.limit,
+        "scheduled": pricing.scheduled,
         "held": pricing.held,
         "fetched_at": pricing.fetched_at.isoformat(),
         "front": _leg_fields(pricing.front),
@@ -320,9 +324,11 @@ def _pricing_fields(pricing: OrderPricing | None) -> dict[str, Any] | None:
 def _pricing(fields: dict[str, Any] | None) -> OrderPricing | None:
     if fields is None:
         return None
+    attempt = fields["attempt"]
     return OrderPricing(
-        fields["attempt"],
+        None if attempt in (None, NATURAL) else attempt,
         fields["limit"],
+        fields.get("scheduled", fields["limit"]),  # absent before the fixed schedule
         fields["held"],
         datetime.fromisoformat(fields["fetched_at"]),
         _leg_prices(fields["front"]),

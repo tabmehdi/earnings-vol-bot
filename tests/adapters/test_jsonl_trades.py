@@ -146,6 +146,7 @@ def test_an_order_keeps_the_quotes_its_limit_came_from_and_the_fill_time(
     pricing = OrderPricing(
         attempt=2,
         limit=2.13,
+        scheduled=2.17,
         held=True,
         fetched_at=OPENED,
         front=LegPrices(1.00, 1.20, 1.10, None, OPENED - timedelta(seconds=1)),
@@ -169,3 +170,24 @@ def test_an_order_keeps_the_quotes_its_limit_came_from_and_the_fill_time(
     repo.save_order(filled)
 
     assert repo.orders_on(date(2026, 11, 19)) == (filled,)
+
+
+def test_the_natural_attempt_is_written_as_natural(tmp_path: Path) -> None:
+    repo = repository(tmp_path)
+    natural = OrderTicket(
+        "o-4",
+        "AAPL-2026-11-20-open-nat",
+        SPREAD,
+        OrderIntent.OPEN,
+        3,
+        2.40,
+        OrderStatus.WORKING,
+        OPENED,
+        priced_from=OrderPricing(None, 2.40, 2.40, False, OPENED, None, None),
+    )
+
+    repo.save_order(natural)
+
+    (log,) = (tmp_path / "trades" / "orders").iterdir()
+    assert json.loads(log.read_text(encoding="utf-8"))["priced_from"]["attempt"] == "natural"
+    assert repo.orders_on(date(2026, 11, 19)) == (natural,)

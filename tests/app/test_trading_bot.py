@@ -147,7 +147,7 @@ def harness(
         fallback_rate=0.045,
     )
     pricing = MidWalkPolicy(steps=5, step_seconds=20, entry_cap_fraction=0.5)
-    execution = ExecutionService(broker, market, pricing, repository, clock)
+    execution = ExecutionService(broker, market, pricing, repository, clock, 0.05)
     bot = TradingBot(
         clock,
         calendar,
@@ -308,6 +308,136 @@ def test_a_risk_rejection_skips_with_its_reason(caplog: pytest.LogCaptureFixture
 
     assert opens(h) == []
     assert "round-trip spread cost" in caplog.text
+
+
+# The final entry attempt at the natural price
+
+BASE_ID = "AAPL-2026-11-20-open"
+POLICY = MidWalkPolicy(5, 20, 0.5)
+
+
+def entry_prices() -> tuple[float, float]:
+    """(mid debit, natural debit) of the calendar the session picks for AAPL."""
+    probe = harness(fill_on_check=None)
+    probe.bot.run_session()
+    spread = opens(probe)[0].spread
+    front = SNAPSHOT.chain.quote(spread.front.contract)
+    back = SNAPSHOT.chain.quote(spread.back.contract)
+    return back.mid - front.mid, POLICY.natural(OrderIntent.OPEN, front, back)
+
+
+@dataclass
+class WideningMarketData:
+    """Leg quotes widen by a dollar on each side from the widen_from-th leg-quote fetch on."""
+
+    inner: FakeMarketData
+    widen_from: int
+    fetches: int = 0
+
+    def screen(self, symbols: Any) -> dict[str, str]:
+        return {}
+
+    def get_chain(self, symbol: str) -> ChainSnapshot:
+        return self.inner.get_chain(symbol)
+
+    def get_history(self, symbol: str, end: date, bars: int) -> Any:
+        return self.inner.get_history(symbol, end, bars)
+
+    def get_leg_quotes(self, contracts: Any) -> Any:
+        self.fetches += 1
+        quotes = self.inner.get_leg_quotes(contracts)
+        if self.fetches < self.widen_from:
+            return quotes
+        return {c: replace(q, bid=max(q.bid - 1, 0), ask=q.ask + 1) for c, q in quotes.items()}
+
+
+def test_an_unfilled_walk_ends_with_one_attempt_at_the_natural() -> None:
+    _, natural = entry_prices()
+    h = harness(fill_on_check=None)
+
+    h.bot.run_session()
+
+    assert [t.client_order_id for t in opens(h)] == [BASE_ID, f"{BASE_ID}-nat"]
+    assert opens(h)[1].limit_price == natural
+
+
+def test_a_fill_at_the_natural_is_saved_under_the_entry_id() -> None:
+    _, natural = entry_prices()
+    h = harness(fill_at_or_above=natural)  # the walk's cap stays below the natural
+
+    h.bot.run_session()
+
+    (position,) = h.repository.open_positions()
+    assert position.position_id == BASE_ID
+    assert position.entry.net_price == natural
+
+
+def test_a_restart_after_a_natural_fill_does_not_open_again() -> None:
+    _, natural = entry_prices()
+    h = harness(fill_at_or_above=natural)
+    h.bot.run_session()
+    h.clock.moment = at(THU, 15, 50)
+
+    h.bot.run_session()
+
+    assert len(opens(h)) == 2  # the walk's order and the natural one, never more
+    assert len(h.repository.open_positions()) == 1
+
+
+def test_a_natural_that_breaches_the_spread_cost_cap_is_not_sent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Fetch 1 sizes the trade and fetches 2-6 walk it; from fetch 7 (the natural's re-check)
+    # each leg is two dollars wide.
+    market = WideningMarketData(FakeMarketData({"AAPL": SNAPSHOT}, {"AAPL": HISTORY}), 7)
+    h = harness(market=market, fill_on_check=None)
+
+    with caplog.at_level(logging.INFO):
+        h.bot.run_session()
+
+    assert [t.client_order_id for t in opens(h)] == [BASE_ID]
+    assert "round-trip spread cost" in caplog.text
+
+
+def test_the_natural_order_is_sent_at_the_price_the_risk_check_approved() -> None:
+    # Fetch 7 is the re-check that approves the natural; from fetch 8 (the order's own) each
+    # leg is a dollar wider on each side, so the natural there is higher.
+    _, approved = entry_prices()
+    market = WideningMarketData(FakeMarketData({"AAPL": SNAPSHOT}, {"AAPL": HISTORY}), 8)
+    h = harness(market=market, fill_on_check=None)
+
+    h.bot.run_session()
+
+    assert [t.client_order_id for t in opens(h)] == [BASE_ID, f"{BASE_ID}-nat"]
+    assert opens(h)[1].limit_price == approved
+
+
+def test_a_natural_that_sizes_to_zero_contracts_is_skipped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Equity between the two: 2% of it buys one contract at the mid, none at the natural.
+    mid, natural = entry_prices()
+    equity = (mid + natural) / 2 * 100 / 0.02
+    h = harness(fill_on_check=None, equity=equity)
+
+    with caplog.at_level(logging.INFO):
+        h.bot.run_session()
+
+    assert [t.client_order_id for t in opens(h)] == [BASE_ID]
+    assert "natural" in caplog.text and "budget" in caplog.text
+
+
+def test_no_natural_attempt_after_the_cutoff(caplog: pytest.LogCaptureFixture) -> None:
+    # Entry at close - 15, re-checks until close - 14, cutoff at close - 13: the walk runs
+    # into the cutoff and nothing is left for the natural attempt.
+    settings = replace(SETTINGS, entry_cutoff_minutes_before_close=13)
+    h = harness(settings=settings, fill_on_check=None)
+
+    with caplog.at_level(logging.INFO):
+        h.bot.run_session()
+
+    assert [t.client_order_id for t in opens(h)] == [BASE_ID]
+    assert "cutoff" in caplog.text
 
 
 # Exits

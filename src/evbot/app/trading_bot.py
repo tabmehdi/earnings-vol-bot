@@ -9,8 +9,10 @@ from evbot.app.scanner import Scanner
 from evbot.app.trade_scheduler import TradeScheduler
 from evbot.domain.events import EarningsEvent
 from evbot.domain.options import OptionContract
+from evbot.domain.orders import OrderIntent
 from evbot.domain.scans import ScanKind, ScanRecord
 from evbot.domain.signals import Signal, Verdict
+from evbot.domain.spreads import CalendarSpread
 from evbot.domain.trades import Position
 from evbot.ports.broker import Broker
 from evbot.ports.clock import Clock
@@ -244,6 +246,10 @@ class TradingBot:
             position = self.execution.open(
                 spread, size.contracts, client_order_id, deadline=cutoff, exit_at=window.exit_at
             )
+            if position is None:
+                position = self._open_at_natural(
+                    spread, client_order_id, cutoff, window.exit_at, equity
+                )
         except PortError as error:
             logger.error("%s: entry failed: %s", symbol, error)
             return
@@ -257,6 +263,61 @@ class TradingBot:
                 position.entry.net_price,
                 position.exit_at,
             )
+
+    def _open_at_natural(
+        self,
+        spread: CalendarSpread,
+        entry_id: str,
+        cutoff: datetime,
+        exit_at: datetime,
+        equity: float,
+    ) -> Position | None:
+        """One last entry order at the current natural debit, after the walk did not fill.
+
+        Paper fills seem to need the natural, and the spread-cost check already assumes
+        natural fills both ways. The trade is sized again at the natural debit (so the risk per
+        trade holds) and checked again at the current quotes. The order has its own client id,
+        because the walk's id belongs to its cancelled order; the position keeps the entry id.
+        """
+        symbol = spread.underlying
+        if self.clock.now() >= cutoff:
+            logger.info("%s: entry cutoff %s reached; no attempt at the natural", symbol, cutoff)
+            return None
+        quotes = self.market_data.get_leg_quotes((spread.front.contract, spread.back.contract))
+        front, back = quotes[spread.front.contract], quotes[spread.back.contract]
+        natural = self.execution.pricing.natural(OrderIntent.OPEN, front, back)
+        size = self.sizer.size(equity, natural, spread.front.contract.multiplier)
+        if size.contracts == 0:
+            logger.info("%s: no attempt at the natural %.2f: %s", symbol, natural, size.reason)
+            return None
+        decision = self.risk.approve(
+            spread,
+            front,
+            back,
+            size.contracts,
+            self.repository.open_positions(),
+            equity,
+            debit=natural,
+        )
+        if not decision.approved:
+            logger.info("%s: no attempt at the natural %.2f: %s", symbol, natural, decision.reason)
+            return None
+        logger.info(
+            "%s: the walk did not fill; one attempt at the natural %.2f for %d",
+            symbol,
+            natural,
+            size.contracts,
+        )
+        return self.execution.open(
+            spread,
+            size.contracts,
+            f"{entry_id}-nat",
+            deadline=cutoff,
+            exit_at=exit_at,
+            at_natural=True,
+            position_id=entry_id,
+            max_price=natural,  # the price the risk check approved, never more
+        )
 
     # Reconciliation
 

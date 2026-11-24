@@ -175,7 +175,14 @@ def build_trading_bot(
         execution_config.walk_step_seconds,
         execution_config.entry_cap_fraction,
     )
-    execution = ExecutionService(broker, scanner.market_data, pricing, scanner.repository, clock)
+    execution = ExecutionService(
+        broker,
+        scanner.market_data,
+        pricing,
+        scanner.repository,
+        clock,
+        execution_config.max_quote_drift_pct,
+    )
     return TradingBot(
         clock,
         scanner.trading_calendar,

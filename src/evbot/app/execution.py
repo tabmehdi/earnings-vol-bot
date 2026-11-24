@@ -38,9 +38,13 @@ class ExecutionService:
     """Works one order at a time: fresh quotes, a limit from the pricing policy, re-priced
     every step until filled, out of steps or past the deadline, then cancelled.
 
-    The walk only moves toward the market: an opening limit never drops below the one
-    already sent and a closing limit never rises above it, whatever the next quotes say
-    (they are noisy). Replacements get client ids <base>-r1, -r2..., and a restart finds
+    The walk follows a schedule built once from its first quotes (mid to the cap for an open,
+    mid to the natural for a close), because later quotes are noisy: re-centring on each new
+    mid stalled orders. Later fetches are recorded and only cap the schedule: an order never
+    pays more than the current natural, or asks less than the current natural credit. A mid
+    that moves more than max_quote_drift_pct from the first one is logged. The walk only moves
+    toward the market: an opening limit never drops below the one already sent and a closing
+    limit never rises above it. Replacements get client ids <base>-r1, -r2..., and a restart finds
     the live order through the broker's replacement chain and carries on the walk.
 
     A close goes out as one calendar (mleg) order. If the broker refuses it, the calendar is
@@ -55,6 +59,7 @@ class ExecutionService:
     pricing: PricingPolicy
     repository: TradeRepository
     clock: Clock
+    max_quote_drift_pct: float
 
     def open(
         self,
@@ -63,15 +68,30 @@ class ExecutionService:
         client_order_id: str,
         deadline: datetime,
         exit_at: datetime,
+        at_natural: bool = False,
+        position_id: str | None = None,
+        max_price: float | None = None,
     ) -> Position | None:
-        already = [p for p in self.repository.open_positions() if p.position_id == client_order_id]
+        """position_id defaults to client_order_id; a second order for the same entry (the
+        natural-price attempt) passes the first one's id, so a restart still finds it.
+        max_price is a ceiling on every limit sent: the price the risk check approved."""
+        position_id = position_id or client_order_id
+        already = [p for p in self.repository.open_positions() if p.position_id == position_id]
         if already:
             return already[0]
-        outcome = self._work(spread, OrderIntent.OPEN, quantity, client_order_id, deadline, False)
+        outcome = self._work(
+            spread,
+            OrderIntent.OPEN,
+            quantity,
+            client_order_id,
+            deadline,
+            at_natural,
+            ceiling=max_price,
+        )
         filled = self._calendar_fill(outcome)
         if filled is None:
             return None
-        position = Position(spread, filled, position_id=client_order_id, exit_at=exit_at)
+        position = Position(spread, filled, position_id=position_id, exit_at=exit_at)
         self.repository.save_position(position)
         return position
 
@@ -183,6 +203,7 @@ class ExecutionService:
         deadline: datetime,
         at_natural: bool,
         leg: SpreadLeg | None = None,
+        ceiling: float | None = None,
     ) -> _Outcome:
         ticket = self.broker.find_order(client_order_id, spread)
         if ticket is not None and ticket.is_done:
@@ -203,6 +224,8 @@ class ExecutionService:
         contracts = _traded(spread, leg)
         quotes: Quotes | None = None
         replaced: OrderTicket | None = None  # the order the live one replaced
+        schedule: dict[int, float] = {}  # step -> limit, from the first quotes of this walk
+        first_mid: float | None = None
         attempts: list[int | None] = (
             [None] if at_natural else list(range(first_attempt, self.pricing.steps))
         )
@@ -217,16 +240,43 @@ class ExecutionService:
                 self._pause(deadline)
                 continue
             fetched_at = self.clock.now()
-            walked = self._price(spread, intent, leg, attempt, quotes)
-            price = walked
+            paying = _pays(spread, intent, leg)
+            natural = self._price(spread, intent, leg, None, quotes)
+            mid = _mid(spread, leg, quotes)
+            if attempt is None:
+                scheduled = natural
+            else:
+                if not schedule:
+                    first_mid = mid
+                    schedule = {
+                        step: self._price(spread, intent, leg, step, quotes)
+                        for step in attempts
+                        if step is not None
+                    }
+                else:
+                    self._log_drift(client_order_id, first_mid, mid)
+                scheduled = schedule[attempt]
+            # Never pay more than the market's natural now, nor ask less than its natural credit.
+            capped = min(scheduled, natural) if paying else max(scheduled, natural)
+            if ceiling is not None and paying and capped > ceiling:
+                # Never more than was approved, even if it may not fill now.
+                logger.warning(
+                    "%s: the market now asks %.2f, above the approved %.2f; sending %.2f",
+                    client_order_id,
+                    capped,
+                    ceiling,
+                    ceiling,
+                )
+                capped = ceiling
+            price = capped
             if ticket is not None and attempt is not None:
                 previous = ticket.limit_price
-                opening = intent is OrderIntent.OPEN
-                price = max(previous, walked) if opening else min(previous, walked)
+                price = max(previous, capped) if paying else min(previous, capped)
             pricing = OrderPricing(
                 attempt,
                 price,
-                price != walked,
+                scheduled,
+                price != capped,
                 fetched_at,
                 _prices_of(quotes, spread.front.contract),
                 _prices_of(quotes, spread.back.contract),
@@ -241,10 +291,11 @@ class ExecutionService:
                 ticket = self.broker.replace(ticket, price, f"{client_order_id}-r{replacements}")
             else:
                 logger.info(
-                    "%s: holding at %.2f (these quotes walk to %.2f)",
+                    "%s: holding at %.2f (step %.2f, natural now %.2f)",
                     client_order_id,
                     price,
-                    walked,
+                    scheduled,
+                    natural,
                 )
             ticket = replace(ticket, priced_from=pricing)
             self.repository.save_order(ticket)
@@ -298,6 +349,20 @@ class ExecutionService:
         if attempt is None:
             return self.pricing.leg_natural(side, quote)
         return self.pricing.leg_limit(side, attempt, quote)
+
+    def _log_drift(self, client_order_id: str, first_mid: float | None, mid: float) -> None:
+        """Logs only: the data says whether the walk should react to a moving market."""
+        if not first_mid:
+            return
+        moved = (mid - first_mid) / abs(first_mid)
+        if abs(moved) > self.max_quote_drift_pct:
+            logger.warning(
+                "%s: mid moved %.1f%% from the first quotes (%.2f to %.2f)",
+                client_order_id,
+                abs(moved) * 100,
+                first_mid,
+                mid,
+            )
 
     def _earlier_fill(self, replaced: OrderTicket | None) -> OrderTicket | None:
         """A replacement is refused when the order it replaces filled first, either at once or
@@ -378,6 +443,20 @@ def _replacement_number(live_client_order_id: str, base: str) -> int:
     if match is None:
         raise ValueError(f"{live_client_order_id} is not an order of {base}")
     return int(match[1])
+
+
+def _pays(spread: CalendarSpread, intent: OrderIntent, leg: SpreadLeg | None) -> bool:
+    """True when the order buys (its limit is a ceiling), False when it sells (a floor)."""
+    if leg is None:
+        return intent is OrderIntent.OPEN
+    side = _leg(spread, leg).side
+    return (side if intent is OrderIntent.OPEN else _opposite(side)) is Side.BUY
+
+
+def _mid(spread: CalendarSpread, leg: SpreadLeg | None, quotes: Quotes) -> float:
+    if leg is None:
+        return quotes[spread.back.contract].mid - quotes[spread.front.contract].mid
+    return quotes[_leg(spread, leg).contract].mid
 
 
 def _state(ticket: OrderTicket) -> tuple[object, ...]:

@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -21,6 +22,7 @@ FRONT = OptionContract("AAPL", date(2026, 11, 20), 100.0, OptionRight.CALL)
 BACK = OptionContract("AAPL", date(2026, 12, 18), 100.0, OptionRight.CALL)
 SPREAD = CalendarSpread(Leg(FRONT, Side.SELL), Leg(BACK, Side.BUY))
 POLICY = MidWalkPolicy(steps=5, step_seconds=20, entry_cap_fraction=0.5)
+DRIFT = 0.05  # warn when the mid moves more than 5% from attempt 0's
 # Front 1.00/1.20, back 3.00/3.40: open walk 2.10 2.13 2.17 2.21 2.25; close walk
 # 2.10 2.03 1.95 1.88 1.80; natural credit 1.80.
 QUOTES = {
@@ -37,7 +39,7 @@ def service(
     broker = FakeBroker(clock, **broker_options)  # type: ignore[arg-type]
     repository = InMemoryTradeRepository()
     market = FakeMarketData({}, {}, leg_quotes=dict(QUOTES))
-    return ExecutionService(broker, market, POLICY, repository, clock), broker, repository
+    return ExecutionService(broker, market, POLICY, repository, clock, DRIFT), broker, repository
 
 
 def open_trade(execution: ExecutionService, deadline_minutes: float = 10) -> Position | None:
@@ -371,7 +373,7 @@ def sequenced(
     clock = AdvancingClock(START)
     broker = FakeBroker(clock, **broker_options)  # type: ignore[arg-type]
     repository = InMemoryTradeRepository()
-    return ExecutionService(broker, market, POLICY, repository, clock), broker, repository
+    return ExecutionService(broker, market, POLICY, repository, clock, DRIFT), broker, repository
 
 
 def test_an_opening_walk_never_lowers_its_limit_when_the_quotes_dip() -> None:
@@ -417,11 +419,11 @@ def test_a_restart_after_a_crash_mid_walk_resumes_the_live_order() -> None:
     repository = InMemoryTradeRepository()
     crashing = QuoteSequence([dict(QUOTES)], crash_on=4)  # after the submit, -r1 and -r2
     with pytest.raises(Crash):
-        ExecutionService(broker, crashing, POLICY, repository, clock).open(
+        ExecutionService(broker, crashing, POLICY, repository, clock, DRIFT).open(
             SPREAD, 3, CID, START + timedelta(minutes=10), EXIT_AT
         )
     restarted = ExecutionService(
-        broker, FakeMarketData({}, {}, leg_quotes=dict(QUOTES)), POLICY, repository, clock
+        broker, FakeMarketData({}, {}, leg_quotes=dict(QUOTES)), POLICY, repository, clock, DRIFT
     )
 
     restarted.open(SPREAD, 3, CID, START + timedelta(minutes=10), EXIT_AT)
@@ -516,3 +518,130 @@ def test_an_order_is_recorded_once_until_its_state_changes() -> None:
         OrderStatus.WORKING,  # -r1, a new order
         OrderStatus.FILLED,
     ]
+
+
+# The schedule is fixed from attempt 0's quotes; later quotes only cap it at the natural
+
+
+def test_a_dipping_mid_still_walks_up_to_the_first_quotes_cap() -> None:
+    # The back's mid dips to 3.10 twice, but its 2.60/3.60 market keeps the natural at 2.60,
+    # above every scheduled limit: the walk follows attempt 0's 2.10 ... 2.25 schedule.
+    normal, dip = dict(QUOTES), back_at(2.60, 3.60)
+    execution, broker, repository = sequenced(
+        QuoteSequence([normal, dip, normal, dip, dip]), fill_on_check=None
+    )
+
+    open_trade(execution)
+
+    assert [price for _, price in broker.replaced] == [2.13, 2.17, 2.21, 2.25]
+    attempts = list(dict.fromkeys(o.priced_from for o in repository.orders if o.priced_from))
+    assert [p.scheduled for p in attempts] == [2.10, 2.13, 2.17, 2.21, 2.25]
+    assert not any(p.held for p in attempts)
+
+
+def test_an_opening_limit_never_goes_above_the_current_natural() -> None:
+    # Attempt 2's back offers at 3.15: the natural debit is 3.15 - 1.00 = 2.15, below the
+    # scheduled 2.17, so 2.15 is sent instead.
+    normal, tight = dict(QUOTES), back_at(3.00, 3.15)
+    execution, broker, repository = sequenced(
+        QuoteSequence([normal, normal, tight, normal, normal]), fill_on_check=None
+    )
+
+    open_trade(execution)
+
+    assert [price for _, price in broker.replaced] == [2.13, 2.15, 2.21, 2.25]
+    third = [o.priced_from for o in repository.orders if o.priced_from][2]
+    assert third is not None and (third.scheduled, third.limit) == (2.17, 2.15)
+
+
+def test_a_mid_that_moves_more_than_the_drift_limit_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Back 2.40/3.60: mid debit 3.00 - 1.10 = 1.90, 9.5% below attempt 0's 2.10.
+    normal, moved = dict(QUOTES), back_at(2.40, 3.60)
+    execution, _, _ = sequenced(QuoteSequence([normal, moved]), fill_on_check=None)
+
+    with caplog.at_level(logging.WARNING):
+        open_trade(execution)
+
+    assert "moved" in caplog.text and "9.5%" in caplog.text
+
+
+def test_a_small_move_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    # Back 3.00/3.20: mid debit 3.10 - 1.10 = 2.00, 4.8% below 2.10.
+    normal, small = dict(QUOTES), back_at(3.00, 3.20)
+    execution, _, _ = sequenced(QuoteSequence([normal, small]), fill_on_check=None)
+
+    with caplog.at_level(logging.WARNING):
+        open_trade(execution)
+
+    assert "moved" not in caplog.text
+
+
+def test_opening_at_natural_sends_one_order_at_the_natural_debit() -> None:
+    execution, broker, repository = service()
+
+    position = execution.open(
+        SPREAD,
+        3,
+        f"{CID}-nat",
+        START + timedelta(minutes=10),
+        EXIT_AT,
+        at_natural=True,
+        position_id=CID,
+    )
+
+    assert [t.limit_price for t in broker.submitted] == [2.40]  # back ask 3.40 - front bid 1.00
+    assert broker.replaced == []
+    assert position is not None and position.position_id == CID
+    assert repository.orders[0].priced_from is not None
+    assert repository.orders[0].priced_from.attempt is None
+
+
+def test_a_natural_open_after_a_restart_finds_the_position_by_its_id() -> None:
+    execution, broker, _ = service()
+    first = execution.open(
+        SPREAD, 3, f"{CID}-nat", START + timedelta(minutes=10), EXIT_AT, True, CID
+    )
+
+    again = execution.open(
+        SPREAD, 3, f"{CID}-nat", START + timedelta(minutes=10), EXIT_AT, True, CID
+    )
+
+    assert again == first
+    assert len(broker.submitted) == 1
+
+
+def test_a_natural_open_never_sends_more_than_the_approved_price(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Approved at a natural of 8.95; by the order's own fetch the natural is 10.65 - 1.00 = 9.65.
+    moved = back_at(10.00, 10.65)
+    execution, broker, repository = sequenced(QuoteSequence([moved]))
+
+    with caplog.at_level(logging.WARNING):
+        execution.open(
+            SPREAD,
+            1,
+            f"{CID}-nat",
+            START + timedelta(minutes=10),
+            EXIT_AT,
+            at_natural=True,
+            position_id=CID,
+            max_price=8.95,
+        )
+
+    assert [t.limit_price for t in broker.submitted] == [8.95]
+    pricing = repository.orders[0].priced_from
+    assert pricing is not None and (pricing.scheduled, pricing.limit) == (9.65, 8.95)
+    assert "9.65" in caplog.text and "8.95" in caplog.text
+
+
+def test_a_natural_below_the_approved_price_is_sent_as_it_is() -> None:
+    execution, broker, _ = service()  # natural 3.40 - 1.00 = 2.40
+
+    execution.open(
+        SPREAD, 1, f"{CID}-nat", START + timedelta(minutes=10), EXIT_AT, True, CID, max_price=2.50
+    )
+
+    assert [t.limit_price for t in broker.submitted] == [2.40]

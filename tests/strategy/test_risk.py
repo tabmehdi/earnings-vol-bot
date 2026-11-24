@@ -108,3 +108,15 @@ def test_closed_positions_do_not_count() -> None:
 def test_needs_at_least_one_contract(contracts: int) -> None:
     with pytest.raises(ValueError):
         RISK.approve(calendar(), *TIGHT, contracts=contracts, open_positions=(), equity=EQUITY)
+
+
+def test_committed_capital_can_be_checked_at_the_debit_actually_paid() -> None:
+    # 20% of 10,000 = 2,000. At the 2.05 mid, 9 contracts commit 1,845; at the 2.30 natural,
+    # 2,070, above the limit.
+    at_mid = RISK.approve(calendar(), *TIGHT, contracts=9, open_positions=(), equity=10_000)
+    at_natural = RISK.approve(
+        calendar(), *TIGHT, contracts=9, open_positions=(), equity=10_000, debit=2.30
+    )
+
+    assert at_mid.approved
+    assert not at_natural.approved and "committed" in at_natural.reason

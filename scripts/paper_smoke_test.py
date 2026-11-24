@@ -82,7 +82,8 @@ def describe_pricing(ticket: OrderTicket) -> str:
     )
     held = " (held)" if pricing.held else ""
     return (
-        f"{ticket.client_order_id} {step}: limit {pricing.limit:.2f}{held}, "
+        f"{ticket.client_order_id} {step}: limit {pricing.limit:.2f}{held} "
+        f"(step {pricing.scheduled:.2f}), "
         f"fetched {pricing.fetched_at:%H:%M:%S}: {legs}"
     )
 
@@ -220,7 +221,9 @@ def main() -> int:
             )
         )
         repository = JsonlTradeRepository(RECORDS / "signals", RECORDS / "trades")
-        execution = ExecutionService(broker, market, pricing, repository, CLOCK)
+        execution = ExecutionService(
+            broker, market, pricing, repository, CLOCK, execution_config.max_quote_drift_pct
+        )
         result = round_trip(execution, broker, spread, tag)
         show("== what each limit was computed from")
         seen = set()

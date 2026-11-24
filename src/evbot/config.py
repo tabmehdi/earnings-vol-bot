@@ -92,6 +92,7 @@ class ExecutionConfig:
     walk_steps: int
     walk_step_seconds: float
     entry_cap_fraction: float
+    max_quote_drift_pct: float
 
 
 @dataclass(frozen=True, slots=True)

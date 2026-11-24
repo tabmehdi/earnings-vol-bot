@@ -61,6 +61,7 @@ max_committed_pct = 0.20
 walk_steps = 5
 walk_step_seconds = 20
 entry_cap_fraction = 0.5       # entries never pay more than mid + 50% of half-width
+max_quote_drift_pct = 0.05     # log (only) when a walk's mid moves this far from attempt 0's
 
 [storage]
 snapshot_dir = "data/snapshots"

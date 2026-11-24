@@ -31,14 +31,17 @@ DONE = frozenset({OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTE
 class OrderPricing:
     """What one attempt's limit was computed from, so a missed fill can be explained later.
 
-    attempt is the walk step (None for the single natural-price attempt). held means the walk
-    kept the previous limit because these quotes would have moved it backwards. fetched_at is
+    attempt is the walk step (None for the single natural-price attempt). scheduled is the
+    step's limit in the schedule built from attempt 0's quotes; limit is what was sent after
+    capping it at these quotes' natural price. held means the walk kept the previous limit
+    because the capped price would have moved it backwards. fetched_at is
     our clock when the quotes arrived; each leg's quoted_at is the broker's quote time. A leg
     order only has its own leg's prices.
     """
 
     attempt: int | None
     limit: float
+    scheduled: float
     held: bool
     fetched_at: datetime
     front: LegPrices | None

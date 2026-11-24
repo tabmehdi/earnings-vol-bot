@@ -197,6 +197,7 @@ def build_trading_bot(
             execution_config.max_spread_cost_pct,
             execution_config.max_open_positions,
             execution_config.max_committed_pct,
+            config.risk.enforce_spread_cost,
         ),
         session_settings(config),
     )

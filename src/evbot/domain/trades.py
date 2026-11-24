@@ -27,6 +27,20 @@ class Fill:
 
 
 @dataclass(frozen=True, slots=True)
+class SpreadCostEstimate:
+    """The round-trip spread cost expected at entry, per spread: each leg's full bid-ask width
+    (half paid going in, half coming out), next to the mid debit it is measured against.
+    Kept on the position to compare with the slippage the fills actually show."""
+
+    round_trip: float
+    mid_debit: float
+
+    @property
+    def share(self) -> float:
+        return self.round_trip / self.mid_debit
+
+
+@dataclass(frozen=True, slots=True)
 class Position:
     spread: CalendarSpread
     entry: Fill
@@ -35,6 +49,7 @@ class Position:
     exit_at: datetime | None = None  # when the exit job should close it
     exit_failed: bool = False  # still open after the last exit attempt; needs a look
     front_closed: Fill | None = None  # the front bought back on its own: long back only
+    spread_cost: SpreadCostEstimate | None = None  # estimated at entry, from the quotes
 
     def __post_init__(self) -> None:
         if self.entry.net_price < 0:

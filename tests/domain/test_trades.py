@@ -6,7 +6,7 @@ import pytest
 from evbot.domain.options import OptionContract, OptionRight
 from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread, Leg, Side
-from evbot.domain.trades import Fill, Position
+from evbot.domain.trades import Fill, Position, SpreadCostEstimate
 
 SPREAD = CalendarSpread(
     Leg(OptionContract("AAPL", date(2026, 11, 20), 100.0, OptionRight.CALL), Side.SELL),
@@ -175,3 +175,19 @@ def test_split_divides_a_front_buy_back_too() -> None:
     assert part.front_closed is not None and part.front_closed.quantity == 1
     assert rest.front_closed is not None and rest.front_closed.quantity == 2
     assert part.front_closed.net_price == rest.front_closed.net_price == 0.90
+
+
+# The spread cost estimated at entry, to compare with realized slippage later
+
+
+def test_a_spread_cost_estimate_is_a_share_of_the_mid_debit() -> None:
+    estimate = SpreadCostEstimate(round_trip=0.30, mid_debit=2.00)
+
+    assert estimate.share == pytest.approx(0.15)
+
+
+def test_a_position_keeps_its_entry_spread_cost_estimate() -> None:
+    estimate = SpreadCostEstimate(0.30, 2.00)
+    position = Position(SPREAD, Fill(2.00, 3, OPENED), spread_cost=estimate)
+
+    assert position.close(Fill(2.50, 3, CLOSED)).spread_cost == estimate

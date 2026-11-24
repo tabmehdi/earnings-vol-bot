@@ -24,7 +24,7 @@ from evbot.domain.signals import (
     Verdict,
 )
 from evbot.domain.spreads import CalendarSpread, Leg, Side
-from evbot.domain.trades import Fill, Position
+from evbot.domain.trades import Fill, Position, SpreadCostEstimate
 from evbot.ports.errors import RepositoryError
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -389,7 +389,20 @@ def _position_fields(position: Position) -> dict[str, Any]:
         "exit_at": _time_text(position.exit_at),
         "exit_failed": position.exit_failed,
         "front_closed": _fill_fields(position.front_closed),
+        "spread_cost": _spread_cost_fields(position.spread_cost),
     }
+
+
+def _spread_cost_fields(cost: SpreadCostEstimate | None) -> dict[str, Any] | None:
+    if cost is None:
+        return None
+    return {"round_trip": cost.round_trip, "mid_debit": cost.mid_debit, "share": cost.share}
+
+
+def _spread_cost(fields: dict[str, Any] | None) -> SpreadCostEstimate | None:
+    if fields is None:
+        return None
+    return SpreadCostEstimate(fields["round_trip"], fields["mid_debit"])
 
 
 def _position(fields: dict[str, Any]) -> Position:
@@ -403,4 +416,5 @@ def _position(fields: dict[str, Any]) -> Position:
         _time(fields["exit_at"]),
         fields["exit_failed"],
         _fill(fields.get("front_closed")),  # absent in files written before legged exits
+        _spread_cost(fields.get("spread_cost")),  # absent before spread-cost estimates
     )

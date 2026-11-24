@@ -63,6 +63,11 @@ walk_step_seconds = 20
 entry_cap_fraction = 0.5       # entries never pay more than mid + 50% of half-width
 max_quote_drift_pct = 0.05     # log (only) when a walk's mid moves this far from attempt 0's
 
+[risk]
+# While paper trading, the spread-cost check only logs: indicative quotes are far
+# wider than the market on mid-size names (ADR 0007). Recalibrate from paper fills.
+enforce_spread_cost = false
+
 [storage]
 snapshot_dir = "data/snapshots"
 signals_dir = "data/signals"

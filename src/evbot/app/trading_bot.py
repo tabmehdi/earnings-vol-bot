@@ -241,10 +241,17 @@ class TradingBot:
         if not decision.approved:
             logger.info("%s: not opened: %s", symbol, decision.reason)
             return
+        if decision.warning:
+            logger.warning("%s: %s", symbol, decision.warning)
         client_order_id = f"{symbol}-{event.report_date.isoformat()}-open"
         try:
             position = self.execution.open(
-                spread, size.contracts, client_order_id, deadline=cutoff, exit_at=window.exit_at
+                spread,
+                size.contracts,
+                client_order_id,
+                deadline=cutoff,
+                exit_at=window.exit_at,
+                spread_cost=decision.spread_cost,
             )
             if position is None:
                 position = self._open_at_natural(
@@ -302,6 +309,8 @@ class TradingBot:
         if not decision.approved:
             logger.info("%s: no attempt at the natural %.2f: %s", symbol, natural, decision.reason)
             return None
+        if decision.warning:
+            logger.warning("%s: at the natural: %s", symbol, decision.warning)
         logger.info(
             "%s: the walk did not fill; one attempt at the natural %.2f for %d",
             symbol,
@@ -317,6 +326,7 @@ class TradingBot:
             at_natural=True,
             position_id=entry_id,
             max_price=natural,  # the price the risk check approved, never more
+            spread_cost=decision.spread_cost,
         )
 
     # Reconciliation

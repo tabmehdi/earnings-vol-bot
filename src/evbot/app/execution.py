@@ -14,7 +14,7 @@ from evbot.domain.orders import (
 )
 from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread, Leg, Side
-from evbot.domain.trades import Fill, Position
+from evbot.domain.trades import Fill, Position, SpreadCostEstimate
 from evbot.ports.broker import Broker
 from evbot.ports.clock import Clock
 from evbot.ports.errors import PortError
@@ -71,6 +71,7 @@ class ExecutionService:
         at_natural: bool = False,
         position_id: str | None = None,
         max_price: float | None = None,
+        spread_cost: SpreadCostEstimate | None = None,
     ) -> Position | None:
         """position_id defaults to client_order_id; a second order for the same entry (the
         natural-price attempt) passes the first one's id, so a restart still finds it.
@@ -91,7 +92,9 @@ class ExecutionService:
         filled = self._calendar_fill(outcome)
         if filled is None:
             return None
-        position = Position(spread, filled, position_id=position_id, exit_at=exit_at)
+        position = Position(
+            spread, filled, position_id=position_id, exit_at=exit_at, spread_cost=spread_cost
+        )
         self.repository.save_position(position)
         return position
 

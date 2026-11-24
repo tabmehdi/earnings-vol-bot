@@ -7,7 +7,18 @@ from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.domain.trades import Fill, Position
 from evbot.strategy.risk import RiskManager
 
-RISK = RiskManager(max_spread_cost_pct=0.35, max_open_positions=5, max_committed_pct=0.20)
+RISK = RiskManager(
+    max_spread_cost_pct=0.35,
+    max_open_positions=5,
+    max_committed_pct=0.20,
+    enforce_spread_cost=True,
+)
+LOG_ONLY = RiskManager(
+    max_spread_cost_pct=0.35,
+    max_open_positions=5,
+    max_committed_pct=0.20,
+    enforce_spread_cost=False,
+)
 EQUITY = 100_000.0
 NOW = datetime(2026, 11, 19, 20, 45, tzinfo=UTC)
 
@@ -120,3 +131,45 @@ def test_committed_capital_can_be_checked_at_the_debit_actually_paid() -> None:
 
     assert at_mid.approved
     assert not at_natural.approved and "committed" in at_natural.reason
+
+
+# Log-only spread cost (paper: indicative widths are inflated, ADR 0007)
+
+# Front 1.00/1.60 (mid 1.30), back 2.70/3.90 (mid 3.30): debit mid 2.00.
+# Round trip = 0.60 + 1.20 = 1.80, which is 90% of 2.00.
+WIDE = legs((1.00, 1.60), (2.70, 3.90))
+
+
+def test_a_90_percent_spread_cost_is_recorded_but_not_rejected_when_not_enforced() -> None:
+    decision = LOG_ONLY.approve(calendar(), *WIDE, contracts=1, open_positions=(), equity=EQUITY)
+
+    assert decision.approved
+    assert decision.spread_cost is not None
+    assert decision.spread_cost.share == pytest.approx(0.90)
+    assert "90.0%" in decision.warning and "not enforced" in decision.warning
+
+
+def test_a_90_percent_spread_cost_is_rejected_when_enforced() -> None:
+    decision = RISK.approve(calendar(), *WIDE, contracts=1, open_positions=(), equity=EQUITY)
+
+    assert not decision.approved
+    assert "round-trip spread cost" in decision.reason
+    assert decision.spread_cost is not None and decision.spread_cost.share == pytest.approx(0.90)
+
+
+def test_the_other_checks_still_apply_when_spread_cost_is_not_enforced() -> None:
+    decision = LOG_ONLY.approve(
+        calendar("AAPL"), *WIDE, contracts=1, open_positions=(held("AAPL"),), equity=EQUITY
+    )
+
+    assert not decision.approved and "already held" in decision.reason
+
+
+def test_an_approval_within_the_limit_carries_its_estimate_and_no_warning() -> None:
+    decision = LOG_ONLY.approve(calendar(), *TIGHT, contracts=1, open_positions=(), equity=EQUITY)
+
+    assert decision.approved and decision.warning == ""
+    assert decision.spread_cost is not None
+    assert (decision.spread_cost.round_trip, decision.spread_cost.mid_debit) == pytest.approx(
+        (0.30, 2.05)
+    )

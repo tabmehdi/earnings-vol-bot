@@ -8,7 +8,7 @@ from evbot.domain.options import OptionContract, OptionRight
 from evbot.domain.orders import OrderIntent, OrderPricing, OrderStatus, OrderTicket, SpreadLeg
 from evbot.domain.signals import LegPrices
 from evbot.domain.spreads import CalendarSpread, Leg, Side
-from evbot.domain.trades import Fill, Position
+from evbot.domain.trades import Fill, Position, SpreadCostEstimate
 
 OPENED = datetime(2026, 11, 19, 20, 45, tzinfo=UTC)
 CLOSED = datetime(2026, 11, 20, 14, 45, tzinfo=UTC)
@@ -191,3 +191,12 @@ def test_the_natural_attempt_is_written_as_natural(tmp_path: Path) -> None:
     (log,) = (tmp_path / "trades" / "orders").iterdir()
     assert json.loads(log.read_text(encoding="utf-8"))["priced_from"]["attempt"] == "natural"
     assert repo.orders_on(date(2026, 11, 19)) == (natural,)
+
+
+def test_a_position_keeps_its_spread_cost_estimate(tmp_path: Path) -> None:
+    repo = repository(tmp_path)
+    estimated = replace(POSITION, spread_cost=SpreadCostEstimate(1.80, 2.00))
+
+    repo.save_position(estimated)
+
+    assert repo.open_positions() == (estimated,)

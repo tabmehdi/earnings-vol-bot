@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from evbot.domain.options import OptionQuote
 from evbot.domain.spreads import CalendarSpread
-from evbot.domain.trades import Position
+from evbot.domain.trades import Position, SpreadCostEstimate
 
 TOLERANCE = 1e-9  # quotes are cents; float noise must not flip a limit exactly on the edge
 
@@ -12,13 +12,19 @@ TOLERANCE = 1e-9  # quotes are cents; float noise must not flip a limit exactly 
 class RiskDecision:
     approved: bool
     reason: str = ""
+    spread_cost: SpreadCostEstimate | None = None  # set once the quotes give a debit
+    warning: str = ""  # a limit breached but not enforced (logged, not a rejection)
 
 
 @dataclass(frozen=True, slots=True)
 class RiskManager:
+    """enforce_spread_cost False (paper) still measures and reports the spread cost but does
+    not reject on it: indicative quotes are much wider than the market (ADR 0007)."""
+
     max_spread_cost_pct: float
     max_open_positions: int
     max_committed_pct: float
+    enforce_spread_cost: bool
 
     def approve(
         self,
@@ -44,20 +50,25 @@ class RiskManager:
         if mid <= 0:
             return RiskDecision(False, f"no debit to pay ({mid:.2f})")
         # Half of each leg's bid-ask width, paid on the way in and again on the way out.
-        round_trip = (front.ask - front.bid) + (back.ask - back.bid)
-        share = round_trip / mid
-        if share > self.max_spread_cost_pct + TOLERANCE:
-            return RiskDecision(
-                False,
-                f"round-trip spread cost {round_trip:.2f} is {share:.1%} of the "
-                f"{mid:.2f} debit, above {self.max_spread_cost_pct:.0%}",
+        cost = SpreadCostEstimate((front.ask - front.bid) + (back.ask - back.bid), mid)
+        warning = ""
+        if cost.share > self.max_spread_cost_pct + TOLERANCE:
+            breach = (
+                f"round-trip spread cost {cost.round_trip:.2f} is {cost.share:.1%} of the "
+                f"{mid:.2f} debit, above {self.max_spread_cost_pct:.0%}"
             )
+            if self.enforce_spread_cost:
+                return RiskDecision(False, breach, cost)
+            warning = f"{breach} (not enforced)"
         paid = mid if debit is None else debit
         multiplier = spread.front.contract.multiplier
         committed = sum(p.cost for p in still_open) + paid * contracts * multiplier
         limit = self.max_committed_pct * equity
         if committed > limit + TOLERANCE:
             return RiskDecision(
-                False, f"{committed:,.0f} would be committed, above the {limit:,.0f} limit"
+                False,
+                f"{committed:,.0f} would be committed, above the {limit:,.0f} limit",
+                cost,
+                warning,
             )
-        return RiskDecision(True)
+        return RiskDecision(True, spread_cost=cost, warning=warning)

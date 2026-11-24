@@ -96,6 +96,11 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RiskConfig:
+    enforce_spread_cost: bool
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyConfig:
     filters: FilterConfig
     structure: StructureConfig
@@ -105,6 +110,7 @@ class StrategyConfig:
     market_data: MarketDataConfig
     storage: StorageConfig
     execution: ExecutionConfig
+    risk: RiskConfig
 
 
 def config_path() -> Path:
@@ -125,4 +131,5 @@ def load_config(path: Path | None = None) -> StrategyConfig:
         market_data=MarketDataConfig(**raw["market_data"]),
         storage=StorageConfig(**raw["storage"]),
         execution=ExecutionConfig(**raw["execution"]),
+        risk=RiskConfig(**raw["risk"]),
     )

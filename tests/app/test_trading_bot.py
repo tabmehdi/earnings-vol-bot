@@ -80,7 +80,12 @@ SETTINGS = SessionSettings(
     exit_deadline_minutes_before_close=60,
 )
 SIZER = FixedRiskSizer(max_risk_per_trade_pct=0.02, max_contracts=10)
-RISK = RiskManager(max_spread_cost_pct=0.35, max_open_positions=5, max_committed_pct=0.20)
+RISK = RiskManager(
+    max_spread_cost_pct=0.35,
+    max_open_positions=5,
+    max_committed_pct=0.20,
+    enforce_spread_cost=True,
+)
 SNAPSHOT = ChainSnapshot(build_chain(BACKWARDATED), 0, FEEDS)
 
 
@@ -300,7 +305,7 @@ def test_too_little_equity_for_one_contract_skips_with_a_reason(
 
 
 def test_a_risk_rejection_skips_with_its_reason(caplog: pytest.LogCaptureFixture) -> None:
-    strict = RiskManager(max_spread_cost_pct=0.001, max_open_positions=5, max_committed_pct=0.2)
+    strict = replace(RISK, max_spread_cost_pct=0.001)
     h = harness(risk=strict)
 
     with caplog.at_level(logging.INFO):
@@ -308,6 +313,36 @@ def test_a_risk_rejection_skips_with_its_reason(caplog: pytest.LogCaptureFixture
 
     assert opens(h) == []
     assert "round-trip spread cost" in caplog.text
+
+
+def test_a_log_only_spread_cost_is_logged_and_the_calendar_still_opens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log_only = replace(RISK, max_spread_cost_pct=0.001, enforce_spread_cost=False)
+    h = harness(risk=log_only)
+
+    with caplog.at_level(logging.INFO):
+        h.bot.run_session()
+
+    (position,) = h.repository.open_positions()
+    assert "round-trip spread cost" in caplog.text and "not enforced" in caplog.text
+    assert position.spread_cost is not None and position.spread_cost.share > 0.001
+
+
+def test_an_opened_position_records_the_estimated_spread_cost() -> None:
+    h = harness()
+
+    h.bot.run_session()
+
+    (position,) = h.repository.open_positions()
+    spread = position.spread
+    front = SNAPSHOT.chain.quote(spread.front.contract)
+    back = SNAPSHOT.chain.quote(spread.back.contract)
+    assert position.spread_cost is not None
+    assert position.spread_cost.round_trip == pytest.approx(
+        (front.ask - front.bid) + (back.ask - back.bid)
+    )
+    assert position.spread_cost.mid_debit == pytest.approx(back.mid - front.mid)
 
 
 # The final entry attempt at the natural price

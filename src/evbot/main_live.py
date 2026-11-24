@@ -3,17 +3,19 @@
 import argparse
 import logging
 import os
+import re
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import date, time
+from datetime import date, datetime, time
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
 from evbot.adapters.alpaca_broker import AlpacaBroker
-from evbot.adapters.alpaca_market_data import AlpacaMarketData
+from evbot.adapters.alpaca_market_data import AlpacaMarketData, occ_symbol
+from evbot.adapters.alpaca_option_trades import AlpacaOptionTradeHistory
 from evbot.adapters.alpaca_trading_calendar import AlpacaTradingCalendar
 from evbot.adapters.fred_risk_free_rate import FredRiskFreeRate
 from evbot.adapters.http_client import JsonGetter, RequestsJsonHttpClient
@@ -23,6 +25,14 @@ from evbot.adapters.nasdaq_earnings_calendar import NasdaqEarningsCalendar
 from evbot.adapters.parquet_snapshot_store import ParquetSnapshotStore
 from evbot.adapters.rate_limiter import TokenBucket
 from evbot.app.execution import ExecutionService
+from evbot.app.quote_audit import (
+    NEW_YORK,
+    AuditReport,
+    ContractAudit,
+    QuoteAudit,
+    SignalAudit,
+    summarize,
+)
 from evbot.app.scanner import MARKET_DATA, QUOTE_FRESHNESS, Scanner, ScanUniverse
 from evbot.app.trade_scheduler import TradeScheduler
 from evbot.app.trading_bot import SessionSettings, TradingBot
@@ -218,6 +228,122 @@ def session_settings(config: StrategyConfig) -> SessionSettings:
     )
 
 
+def build_quote_audit(
+    config: StrategyConfig, session: requests.Session, key_id: str, secret_key: str
+) -> QuoteAudit:
+    """Reads saved scans and Alpaca's historical trades; nothing here can place an order."""
+    market = config.market_data
+    http = build_http(market, session, market.alpaca_requests_per_minute)
+    return QuoteAudit(
+        JsonlTradeRepository(Path(config.storage.signals_dir), Path(config.storage.trades_dir)),
+        AlpacaOptionTradeHistory(http, market.data_base_url, key_id, secret_key),
+    )
+
+
+WINDOW = re.compile(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$")
+
+
+def parse_window(text: str) -> tuple[time, time]:
+    """ "15:15-15:55" as two New York times; raises ValueError."""
+    match = WINDOW.match(text.strip())
+    if match is None:
+        raise ValueError(f"window must look like 15:15-15:55, got {text!r}")
+    start, end = (time.fromisoformat(part.zfill(5)) for part in match.groups())
+    if end <= start:
+        raise ValueError(f"window end {end} must be after its start {start}")
+    return start, end
+
+
+def format_audit(report: AuditReport) -> str:
+    lines = [
+        f"Quote audit {report.day}: trades {report.start.astimezone(NEW_YORK):%H:%M} to "
+        f"{report.end.astimezone(NEW_YORK):%H:%M} New York, {len(report.signals)} calendars",
+    ]
+    if not report.signals:
+        lines.append("No RECOMMENDED signal with a spread that day (or none for --symbols).")
+    for audited in report.signals:
+        for contract in (audited.front, audited.back):
+            lines += ["", *_contract_lines(contract)]
+        lines += ["", *_calendar_lines(audited)]
+    lines += ["", *_width_table(report.signals)]
+    return "\n".join(lines)
+
+
+def _contract_lines(audited: ContractAudit) -> list[str]:
+    lines = [f"=== {audited.name}  {occ_symbol(audited.contract)}"]
+    for recorded in audited.recorded:
+        q = recorded.prices
+        width = q.ask - q.bid
+        share = f" ({width / q.mid:.1%})" if q.mid else ""
+        lines.append(
+            f"  recorded {recorded.scan:<19} ({recorded.verdict.value:<11}) bid {q.bid:.2f} "
+            f"ask {q.ask:.2f} mid {q.mid:.3f} width {width:.2f}{share}"
+        )
+    if audited.trades is None:
+        return [*lines, f"  trades unavailable: {audited.error}"]
+    if not audited.trades:
+        return [*lines, "  no trades in the window"]
+    for trade in audited.trades:
+        moment = trade.traded_at.astimezone(NEW_YORK)
+        lines.append(f"  trade {moment:%H:%M:%S}  {trade.price:.2f} x{trade.size}")
+    summary = summarize(audited.trades)
+    lines.append(
+        f"  summary: {summary.count} trades, {summary.contracts} contracts, "
+        f"min {summary.low:.2f} max {summary.high:.2f} median {summary.median:.2f}"
+    )
+    for recorded in audited.recorded:
+        lines.append(
+            f"    vs {recorded.scan:<19} median - mid {summary.median - recorded.prices.mid:+.3f}; "
+            f"inside bid/ask {summary.inside(recorded.prices)}, "
+            f"outside {summary.outside(recorded.prices)}"
+        )
+    return lines
+
+
+def _calendar_lines(audited: SignalAudit) -> list[str]:
+    recorded = ", ".join(f"{scan} {debit:.2f}" for scan, debit in audited.recorded_debits)
+    lines = [f"--- {audited.symbol} calendar: recorded debit_mid {recorded or '-'}"]
+    if not audited.prints:
+        return [*lines, "  no calendar prints (front and back in the same second and size)"]
+    for printed in audited.prints:
+        versus = ", ".join(
+            f"recorded {debit:.2f} ({printed.debit - debit:+.2f})"
+            for _, debit in audited.recorded_debits
+        )
+        lines.append(
+            f"  calendar print {printed.at.astimezone(NEW_YORK):%H:%M:%S} x{printed.size}: "
+            f"debit {printed.debit:.2f} (front {printed.front_price:.2f}, "
+            f"back {printed.back_price:.2f}); {versus or 'nothing recorded'}"
+        )
+    return lines
+
+
+def _width_table(signals: Sequence[SignalAudit]) -> list[str]:
+    lines = [
+        f"{'CONTRACT':<12}{'OCC SYMBOL':<22}{'RECORDED WIDTH':>16}{'TRADE RANGE':>20}{'TRADES':>8}"
+    ]
+    for audited in signals:
+        for contract in (audited.front, audited.back):
+            widths = [r.prices.ask - r.prices.bid for r in contract.recorded]
+            recorded = (
+                "-"
+                if not widths
+                else f"{min(widths):.2f}"
+                if min(widths) == max(widths)
+                else f"{min(widths):.2f}-{max(widths):.2f}"
+            )
+            if not contract.trades:
+                observed, count = ("n/a" if contract.trades is None else "-"), 0
+            else:
+                s = summarize(contract.trades)
+                observed, count = f"{s.high - s.low:.2f} ({s.low:.2f}-{s.high:.2f})", s.count
+            lines.append(
+                f"{contract.name:<12}{occ_symbol(contract.contract):<22}"
+                f"{recorded:>16}{observed:>20}{count:>8}"
+            )
+    return lines
+
+
 def parse_tickers(text: str) -> tuple[str, ...]:
     return tuple(ticker.strip().upper() for ticker in text.split(",") if ticker.strip())
 
@@ -299,7 +425,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     preview_command.add_argument(
         "--tickers", help="comma-separated symbols to scan as if they report next session"
     )
+    audit_command = commands.add_parser(
+        "quote-audit",
+        help="compare the quotes a day's scans recorded with the trades printed; reads only",
+    )
+    audit_command.add_argument("--date", required=True, type=date.fromisoformat)
+    audit_command.add_argument("--symbols", help="comma-separated; any verdict")
+    audit_command.add_argument("--window", default="15:15-15:55", help="New York, HH:MM-HH:MM")
     args = parser.parse_args(argv)
+    if args.command == "quote-audit":
+        try:
+            window = parse_window(args.window)
+        except ValueError as error:
+            parser.error(str(error))
+        symbols = parse_tickers(args.symbols) if args.symbols else None
+        _run_quote_audit(parser, args.date, window, symbols)
+        return
     tickers = None
     if args.command == "preview" and args.tickers is not None:
         tickers = parse_tickers(args.tickers)
@@ -320,6 +461,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_scheduled(config, key_id, secret_key, fred_key)
     else:
         _run_preview(config, key_id, secret_key, fred_key, tickers, args.limit)
+
+
+def _run_quote_audit(
+    parser: argparse.ArgumentParser,
+    day: date,
+    window: tuple[time, time],
+    symbols: tuple[str, ...] | None,
+) -> None:
+    load_dotenv(".env")  # explicit: the default search fails for code read from stdin
+    key_id = os.environ.get("ALPACA_API_KEY")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY")
+    if not key_id or not secret_key:
+        parser.error("set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment or .env")
+    start, end = (datetime.combine(day, moment, NEW_YORK) for moment in window)
+    config = load_config()
+    with requests.Session() as session:
+        auditor = build_quote_audit(config, session, key_id, secret_key)
+        report = auditor.audit(day, start, end, symbols=symbols)
+    print(format_audit(report))
 
 
 def _run_preview(

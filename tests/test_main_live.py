@@ -1,17 +1,24 @@
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from evbot import main_live
+from evbot.app.quote_audit import (
+    AuditReport,
+    CalendarPrint,
+    ContractAudit,
+    RecordedQuote,
+    SignalAudit,
+)
 from evbot.app.scanner import ScanUniverse
 from evbot.config import StrategyConfig, load_config
 from evbot.domain.events import EarningsEvent, ReportTiming
-from evbot.domain.options import OptionContract, OptionRight
+from evbot.domain.options import OptionContract, OptionRight, OptionTrade
 from evbot.domain.scans import ScanKind, ScanRecord
-from evbot.domain.signals import FilterResult, Signal, SignalMetrics, Verdict
+from evbot.domain.signals import FilterResult, LegPrices, Signal, SignalMetrics, Verdict
 from evbot.domain.spreads import CalendarSpread, Leg, Side
 from evbot.ports.errors import BrokerError
 from evbot.scan_lock import ScanLock
@@ -365,3 +372,88 @@ def test_a_second_session_the_same_day_exits_cleanly(
 
     assert bot.runs == 0
     assert "another session is running" in session_log(tmp_path)
+
+
+# quote-audit: recorded quotes against printed trades (reads only)
+
+
+def test_a_window_is_two_new_york_times() -> None:
+    assert main_live.parse_window("15:15-15:55") == (time(15, 15), time(15, 55))
+
+
+@pytest.mark.parametrize("text", ["15:15", "15:55-15:15", "3pm-4pm", "15:15-"])
+def test_a_bad_window_is_refused(text: str) -> None:
+    with pytest.raises(ValueError):
+        main_live.parse_window(text)
+
+
+def audited_report() -> AuditReport:
+    front = OptionContract("BBY", date(2026, 11, 27), 97.0, OptionRight.CALL)
+    back = OptionContract("BBY", date(2026, 12, 18), 97.0, OptionRight.CALL)
+    spread = CalendarSpread(Leg(front, Side.SELL), Leg(back, Side.BUY))
+    at = datetime(2026, 11, 23, 15, 48, 46, tzinfo=NEW_YORK)
+    quote = LegPrices(5.06, 7.24, 6.15, None, at)
+    back_audit = ContractAudit(
+        "BBY back",
+        back,
+        (RecordedQuote("scheduled 15:25:05", Verdict.RECOMMENDED, quote),),
+        (OptionTrade(back, at, 5.95, 3), OptionTrade(back, at, 5.85, 1)),
+    )
+    front_audit = ContractAudit("BBY front", front, (), None, "HTTP 403 from Alpaca")
+    signal_audit = SignalAudit(
+        "BBY",
+        spread,
+        front_audit,
+        back_audit,
+        (("scheduled 15:25:05", 1.80),),
+        (CalendarPrint(at, 3, 4.45, 5.95),),
+    )
+    start = datetime(2026, 11, 23, 15, 15, tzinfo=NEW_YORK)
+    return AuditReport(date(2026, 11, 23), start, start + timedelta(minutes=40), (signal_audit,))
+
+
+def test_the_audit_report_shows_quotes_trades_prints_and_the_width_table() -> None:
+    text = main_live.format_audit(audited_report())
+
+    assert "BBY back" in text and "BBY261218C00097000" in text
+    assert "bid 5.06 ask 7.24 mid 6.150 width 2.18" in text
+    assert "15:48:46  5.95 x3" in text
+    assert "2 trades, 4 contracts, min 5.85 max 5.95 median 5.90" in text
+    assert "median - mid -0.250" in text and "inside bid/ask 2, outside 0" in text
+    assert "trades unavailable: HTTP 403 from Alpaca" in text
+    assert "calendar print 15:48:46 x3: debit 1.50" in text and "recorded 1.80" in text
+    table = text.split("WIDTH")[-1]
+    assert "BBY back" in table and "2.18" in table and "0.10" in table
+
+
+def test_quote_audit_prints_the_report_and_never_builds_a_broker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    asked: list[tuple[object, ...]] = []
+
+    class StubAudit:
+        def audit(self, *arguments: object, **options: object) -> AuditReport:
+            asked.append((*arguments, options))
+            return audited_report()
+
+    def no_broker(*_: object) -> None:
+        raise AssertionError("quote-audit must not build a broker")
+
+    monkeypatch.setattr(main_live, "load_dotenv", lambda *_: False)
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    monkeypatch.setattr(main_live, "load_config", lambda: config_in(tmp_path))
+    monkeypatch.setattr(main_live, "AlpacaBroker", no_broker)
+    monkeypatch.setattr(main_live, "build_quote_audit", lambda *_: StubAudit())
+
+    main_live.main(["quote-audit", "--date", "2026-11-23", "--symbols", "bby,dks"])
+
+    assert "BBY back" in capsys.readouterr().out
+    (call,) = asked
+    day, start, end, options = call
+    assert day == date(2026, 11, 23)
+    assert (start, end) == (
+        datetime(2026, 11, 23, 15, 15, tzinfo=NEW_YORK),
+        datetime(2026, 11, 23, 15, 55, tzinfo=NEW_YORK),
+    )
+    assert options == {"symbols": ("BBY", "DKS")}

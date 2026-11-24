@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from evbot.domain.options import OptionChain, OptionContract, OptionQuote, OptionRight
+from evbot.domain.options import OptionChain, OptionContract, OptionQuote, OptionRight, OptionTrade
 
 FRONT = date(2026, 11, 20)
 BACK = date(2026, 12, 18)
@@ -160,3 +160,30 @@ def test_chain_rejects_duplicate_contracts() -> None:
 def test_chain_rejects_naive_as_of() -> None:
     with pytest.raises(ValueError):
         OptionChain("AAPL", 100.0, AS_OF.replace(tzinfo=None), ())
+
+
+# Printed trades
+
+TRADE_CONTRACT = OptionContract("BBY", date(2026, 12, 18), 97.0, OptionRight.CALL)
+
+
+def test_a_trade_keeps_its_contract_time_price_and_size() -> None:
+    printed = OptionTrade(TRADE_CONTRACT, AS_OF, 5.95, 3)
+
+    assert (printed.contract, printed.traded_at, printed.price, printed.size) == (
+        TRADE_CONTRACT,
+        AS_OF,
+        5.95,
+        3,
+    )
+
+
+@pytest.mark.parametrize(("price", "size"), [(-0.01, 1), (5.95, 0)])
+def test_a_trade_needs_a_price_and_a_size(price: float, size: int) -> None:
+    with pytest.raises(ValueError):
+        OptionTrade(TRADE_CONTRACT, AS_OF, price, size)
+
+
+def test_a_trade_time_must_be_timezone_aware() -> None:
+    with pytest.raises(ValueError):
+        OptionTrade(TRADE_CONTRACT, AS_OF.replace(tzinfo=None), 5.95, 1)

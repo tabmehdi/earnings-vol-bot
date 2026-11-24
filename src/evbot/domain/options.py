@@ -27,6 +27,24 @@ class OptionContract:
 
 
 @dataclass(frozen=True, slots=True)
+class OptionTrade:
+    """One printed trade of an option contract: price per contract, size in contracts."""
+
+    contract: OptionContract
+    traded_at: datetime
+    price: float
+    size: int
+
+    def __post_init__(self) -> None:
+        if self.traded_at.utcoffset() is None:
+            raise ValueError("traded_at must be timezone-aware")
+        if self.price < 0:
+            raise ValueError(f"price must not be negative, got {self.price}")
+        if self.size <= 0:
+            raise ValueError(f"size must be positive, got {self.size}")
+
+
+@dataclass(frozen=True, slots=True)
 class OptionQuote:
     contract: OptionContract
     bid: float
